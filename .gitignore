@@ -1,0 +1,8 @@
+.git/
+config/
+logs/
+plugins/
+cronometer_credential.py
+.env
+__pycache__
+.vscode
