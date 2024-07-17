@@ -1,9 +1,9 @@
 from airflow.decorators import dag, task
-from airflow.utils.dates import days_ago
-from datetime import timedelta
+from datetime import timedelta, datetime
 from process_csv import process_csv as process_csv_func
 from visualisation import visualise_data as visualise_data_func
 from upload_s3 import upload_to_s3 as upload_to_s3_func
+from fetch_cronometer import cronometer_export as cronometer_export_func
 
 default_args = {
     'owner': 'airflow',
@@ -11,12 +11,16 @@ default_args = {
     'email_on_failure': False,
     'email_on_retry': False,
     'retries': 1,
-    'retry_delay': timedelta(minutes=5),
+    'retry_delay': timedelta(minutes=2),
 }
 
-@dag(default_args=default_args, schedule_interval='@daily', start_date=days_ago(1), catchup=False, tags=['example'])
+@dag(default_args=default_args, schedule_interval='@daily', start_date=datetime(2023,1,1), catchup=False)
 def csv_processing_dag():
-    
+
+    @task
+    def fetch_cronometer_data():
+        cronometer_export_func()
+
     @task
     def process_csv(file_path1: str, file_path2: str):
         return process_csv_func(file_path1, file_path2)
@@ -29,10 +33,16 @@ def csv_processing_dag():
     def upload_to_s3(file_path: str, bucket_name: str):
         return upload_to_s3_func(file_path, bucket_name)
 
+    # Paths to the CSV files
     file_path1 = '/opt/airflow/csvs/dailysummary.csv'
     file_path2 = '/opt/airflow/csvs/biometrics.csv'
-    cleaned_file_path = process_csv(file_path1, file_path2)
-    visualisation_path = visualise_data(cleaned_file_path)
-    upload_to_s3(visualisation_path, 'airflow-cronometer')
+
+    # Task dependencies
+    fetch_task = fetch_cronometer_data()
+    process_task = process_csv(file_path1, file_path2)
+    visualisation_task = visualise_data(process_task)
+    upload_task = upload_to_s3(visualisation_task, 'airflow-cronometer')
+
+    fetch_task >> process_task >> visualisation_task >> upload_task
 
 dag_instance = csv_processing_dag()
