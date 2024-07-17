@@ -4,6 +4,6 @@ logs/
 plugins/
 cronometer_credential.py
 .env
-/__pycache__
+__pycache__/
 .vscode
 selenium_test.py
