@@ -4,6 +4,7 @@ from process_csv import process_csv as process_csv_func
 from visualisation import visualise_data as visualise_data_func
 from upload_s3 import upload_to_s3 as upload_to_s3_func
 from fetch_cronometer import cronometer_export as cronometer_export_func
+from remove_old_file import remove_old_files as remove_old_files_func
 
 default_args = {
     'owner': 'airflow',
@@ -16,6 +17,10 @@ default_args = {
 
 @dag(default_args=default_args, schedule_interval='@daily', start_date=datetime(2023,1,1), catchup=False)
 def csv_processing_dag():
+
+    @task
+    def remove_files():
+        remove_old_files_func()
 
     @task
     def fetch_cronometer_data():
@@ -38,11 +43,12 @@ def csv_processing_dag():
     file_path2 = '/opt/airflow/csvs/biometrics.csv'
 
     # Task dependencies
+    remove_task = remove_files()
     fetch_task = fetch_cronometer_data()
     process_task = process_csv(file_path1, file_path2)
     visualisation_task = visualise_data(process_task)
     upload_task = upload_to_s3(visualisation_task, 'airflow-cronometer')
 
-    fetch_task >> process_task >> visualisation_task >> upload_task
+    remove_task >> fetch_task >> process_task >> visualisation_task >> upload_task
 
 dag_instance = csv_processing_dag()
