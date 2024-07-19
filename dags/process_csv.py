@@ -31,6 +31,13 @@ def process_csv(file_path1, file_path2):
     
     # Fill any missing values with 0
     processed = processed.fillna(0)
+
+    # Create new columns for rolling Calorie average 7 days and 30 days
+    processed["Energy 7 days avg (kcal)"] = processed["Energy (kcal)"].rolling(7).mean()
+    processed["Energy 30 days avg (kcal)"] = processed["Energy (kcal)"].rolling(30).mean()
+
+    # Create a new column for daily weight change
+    processed["Daily Weight change (kg)"] = processed["Weight (kg)"] - processed["Weight (kg)"].shift(1)
     
     # Save the cleaned and merged data to a new CSV file
     file_path = "C:\\Airflow Project\\processes.csv"
