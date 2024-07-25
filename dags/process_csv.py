@@ -28,6 +28,9 @@ def process_csv(file_path1, file_path2):
     # Merge the 'nutrition' and cleaned 'bio' DataFrames on the 'Date' column
     # Use a left join to retain all rows from the 'nutrition' DataFrame
     processed = pd.merge(nutrition, bio_cleaned, how="left")
+
+    # Fill Weight (kg) with previous value since 0 will disrupt the analysis
+    processed["Weight (kg)"] = processed["Weight (kg)"].fillna(method="backfill")
     
     # Fill any missing values with 0
     processed = processed.fillna(0)
@@ -38,7 +41,11 @@ def process_csv(file_path1, file_path2):
 
     # Create a new column for daily weight change
     processed["Daily Weight change (kg)"] = processed["Weight (kg)"] - processed["Weight (kg)"].shift(1)
-    
+
+    # Shifted the new column to reflect the weight change was due to previous day rather the next day
+    # since the weight measurement was taken every morning
+    processed["Daily Weight change (kg)"] = processed["Daily Weight change (kg)"].shift(-1)
+        
     # Save the cleaned and merged data to a new CSV file
     file_path = "C:\\Airflow Project\\processes.csv"
     processed.to_csv(path_or_buf=file_path, index=False)
