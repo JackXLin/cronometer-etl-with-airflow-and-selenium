@@ -1,4 +1,5 @@
 boto3
 pandas
 matplotlib
+seaborn
 selenium

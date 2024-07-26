@@ -119,7 +119,7 @@ def cronometer_export():
         driver.execute_script("arguments[0].scrollIntoView(true);", export_daily_nutrition_button)
         driver.execute_script("arguments[0].click();", export_daily_nutrition_button)
 
-        time.sleep(1)
+        time.sleep(5)
 
         # Re-select "All Time" for the second export
         # Scroll the "Export Data" button into view and click it
@@ -138,7 +138,7 @@ def cronometer_export():
         driver.execute_script("arguments[0].scrollIntoView(true);", export_biometrics_button)
         driver.execute_script("arguments[0].click();", export_biometrics_button)
 
-        time.sleep(1)
+        time.sleep(5)
 
         # Print a confirmation message
         print("Downloaded CSVs successfully!")
