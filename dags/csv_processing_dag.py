@@ -1,4 +1,6 @@
 from airflow.decorators import dag, task
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.utils.trigger_rule import TriggerRule
 from datetime import timedelta, datetime
 from process_csv import process_csv as process_csv_func
 from visualisation import visualise_data as visualise_data_func
@@ -11,7 +13,7 @@ default_args = {
     'depends_on_past': False,
     'email_on_failure': False,
     'email_on_retry': False,
-    'retries': 1,
+    'retries': 0,
     'retry_delay': timedelta(minutes=2),
 }
 
@@ -50,5 +52,15 @@ def csv_processing_dag():
     upload_task = upload_to_s3(visualisation_task, 'airflow-cronometer')
 
     remove_task >> fetch_task >> process_task >> visualisation_task >> upload_task
+
+    trigger = TriggerDagRunOperator(
+        task_id="trigger_retry",
+        trigger_dag_id="csv_processing_dag",
+        wait_for_completion=True,
+        reset_dag_run=True,
+        trigger_rule=TriggerRule.ONE_FAILED
+    )
+
+    [remove_task >> fetch_task >> process_task >> visualisation_task >> upload_task] >> trigger
 
 dag_instance = csv_processing_dag()
