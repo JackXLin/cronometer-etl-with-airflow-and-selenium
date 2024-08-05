@@ -78,9 +78,9 @@ def visualise_data(file_path):
         for nutrient in nutrients:
             fig, ax = plt.subplots(figsize=(8, 6))
             ax.scatter(processed[nutrient], processed['Daily Weight change (kg)'])
-            ax.set_title(f'Weight vs {nutrient}')
+            ax.set_title(f'Daily Weight Change (kg) vs {nutrient}')
             ax.set_xlabel(nutrient)
-            ax.set_ylabel('Weight (kg)')
+            ax.set_ylabel('Daily Weight Change (kg)')
             ax.grid(True)
             pdf.savefig(fig)
             plt.close(fig)
