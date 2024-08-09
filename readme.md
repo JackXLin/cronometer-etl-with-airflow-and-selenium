@@ -21,8 +21,7 @@ This project demonstrates setting up an automated data pipeline using Apache Air
 
 ## Prerequisites
 
-- Docker and Docker Compose installed
-- AWS CLI configured
+- Docker
 - Cronometer account
 - Python 3.6+
 - Apache Airflow
