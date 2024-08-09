@@ -24,7 +24,13 @@ This project demonstrates setting up an automated data pipeline using Apache Air
 - Docker and Docker Compose installed
 - AWS CLI configured
 - Cronometer account
-- Python installed (if running scripts locally)
+- Python 3.6+
+- Apache Airflow
+- Selenium
+- Boto3 (for S3 interactions)
+- Pandas
+- Matplotlib
+- dotenv (for environment variables)
 
 ## Setup
 
@@ -44,7 +50,7 @@ Add the following to your `docker-compose.yml`:
 environment:
   AWS_ACCESS_KEY_ID: your-access-key-id
   AWS_SECRET_ACCESS_KEY: your-secret-access-key
-  AWS_DEFAULT_REGION: eu-central-1
+  AWS_DEFAULT_REGION: your-region
 ```
 
 ## Running the Docker Containers
