@@ -47,7 +47,7 @@ def process_csv(file_path1, file_path2):
     processed["Daily Weight change (kg)"] = processed["Daily Weight change (kg)"].shift(-1)
         
     # Save the cleaned and merged data to a new CSV file
-    file_path = "C:\\Airflow Project\\processes.csv"
+    file_path = "/opt/airflow/csvs/processed_data.csv"
     processed.to_csv(path_or_buf=file_path, index=False)
 
     # Return the path to the saved CSV file

@@ -8,21 +8,36 @@ import numpy as np
 from scipy import stats
 from sklearn.linear_model import LinearRegression
 import warnings
+import os
+from dotenv import load_dotenv
 warnings.filterwarnings('ignore')
 
-def visualise_data(file_path, height_cm=175, target_weight_kg=70, target_calories=2000):
+# Load environment variables - they are now passed through docker-compose
+# load_dotenv() is not needed since variables are in container environment
+
+def visualise_data(file_path):
     """
     Create comprehensive visualization report for Cronometer data.
+    Parameters are loaded from environment variables.
     
     Args:
         file_path (str): Path to processed CSV file
-        height_cm (float): User height in cm for BMI calculations
-        target_weight_kg (float): Target weight for goal tracking
-        target_calories (int): Target daily calories
     
     Returns:
         str: Path to generated PDF report
     """
+    # Load parameters from environment variables with defaults
+    height_cm = float(os.getenv('USER_HEIGHT_CM', 175))
+    target_weight_kg = float(os.getenv('TARGET_WEIGHT_KG', 70))
+    target_calories = int(os.getenv('TARGET_CALORIES', 2000))
+    protein_goal_g = int(os.getenv('PROTEIN_GOAL_G', 100))
+    fiber_goal_g = int(os.getenv('FIBER_GOAL_G', 25))
+    calorie_tolerance_pct = float(os.getenv('CALORIE_TOLERANCE_PCT', 0.1))  # 10% tolerance by default
+    
+    # Debug: Print loaded values to verify .env is working
+    print(f"DEBUG: Loaded TARGET_WEIGHT_KG = {target_weight_kg}")
+    print(f"DEBUG: Loaded USER_HEIGHT_CM = {height_cm}")
+    print(f"DEBUG: Loaded TARGET_CALORIES = {target_calories}")
     # Load the cleaned CSV file
     processed = pd.read_csv(file_path)
 
@@ -46,22 +61,30 @@ def visualise_data(file_path, height_cm=175, target_weight_kg=70, target_calorie
     processed['Weight_velocity_7d'] = processed['Weight (kg)'].rolling(7).apply(lambda x: np.polyfit(range(len(x)), x, 1)[0] * 7 if len(x) >= 3 else np.nan)
     processed['Weight_velocity_30d'] = processed['Weight (kg)'].rolling(30).apply(lambda x: np.polyfit(range(len(x)), x, 1)[0] * 30 if len(x) >= 7 else np.nan)
     
-    # Calculate macro percentages
-    processed['Protein_pct'] = (processed['Protein (g)'] * 4) / processed['Energy (kcal)'] * 100
-    processed['Carbs_pct'] = (processed['Carbs (g)'] * 4) / processed['Energy (kcal)'] * 100
-    processed['Fat_pct'] = (processed['Fat (g)'] * 9) / processed['Energy (kcal)'] * 100
+    # Calculate macro percentages (avoid division by zero)
+    processed['Protein_pct'] = np.where(processed['Energy (kcal)'] > 0, 
+                                        (processed['Protein (g)'] * 4) / processed['Energy (kcal)'] * 100, 0)
+    processed['Carbs_pct'] = np.where(processed['Energy (kcal)'] > 0,
+                                      (processed['Carbs (g)'] * 4) / processed['Energy (kcal)'] * 100, 0)
+    processed['Fat_pct'] = np.where(processed['Energy (kcal)'] > 0,
+                                    (processed['Fat (g)'] * 9) / processed['Energy (kcal)'] * 100, 0)
     
     # Calculate calorie deficit/surplus
     processed['Calorie_deficit'] = target_calories - processed['Energy (kcal)']
     
-    # Goal tracking metrics
-    processed['Days_to_goal'] = (processed['Weight (kg)'] - target_weight_kg) / processed['Weight_velocity_7d'].abs()
-    processed['On_track_calories'] = (processed['Energy (kcal)'] >= (target_calories * 0.9)) & (processed['Energy (kcal)'] <= (target_calories * 1.1))
+    # Goal tracking metrics (avoid division by zero)
+    processed['Days_to_goal'] = np.where(processed['Weight_velocity_7d'].abs() > 0.001,
+                                         (processed['Weight (kg)'] - target_weight_kg) / processed['Weight_velocity_7d'].abs(),
+                                         np.nan)
+    processed['On_track_calories'] = (processed['Energy (kcal)'] >= (target_calories * (1 - calorie_tolerance_pct))) & (processed['Energy (kcal)'] <= (target_calories * (1 + calorie_tolerance_pct)))
     
     # Seasonal analysis
     processed['Month'] = processed['Date'].dt.month
     processed['Weekday'] = processed['Date'].dt.dayofweek  # 0=Monday, 6=Sunday
     processed['Is_weekend'] = processed['Weekday'].isin([5, 6])
+    
+    # Calculate TDEE estimates
+    tdee_estimates = estimate_tdee(processed)
     
     # Compute the correlation matrix
     correlations = processed[['Daily Weight change (kg)'] + nutrients].corr()
@@ -265,7 +288,7 @@ def visualise_data(file_path, height_cm=175, target_weight_kg=70, target_calorie
         plt.tight_layout()
         pdf.savefig(fig)
         plt.close(fig)
-        
+
         # 5. Original Energy and Weight Plot (Enhanced)
         fig, ax1 = plt.subplots(figsize=(12, 6))
         ax1.plot(processed['Date'], processed['Energy 7 days avg (kcal)'], label='7 Days Avg', color='blue', linewidth=2)
@@ -376,8 +399,8 @@ def visualise_data(file_path, height_cm=175, target_weight_kg=70, target_calorie
         metrics = {
             'Calorie Target': weekly_success['On_track_calories'].mean() * 100,
             'Weight Stable': (weekly_success['Daily Weight change (kg)'].abs() < 0.5).mean() * 100,
-            'Protein Goal': (weekly_success['Protein (g)'] >= 100).mean() * 100,  # Assuming 100g protein goal
-            'Fiber Goal': (weekly_success['Fiber (g)'] >= 25).mean() * 100   # Assuming 25g fiber goal
+            'Protein Goal': (weekly_success['Protein (g)'] >= protein_goal_g).mean() * 100,
+            'Fiber Goal': (weekly_success['Fiber (g)'] >= fiber_goal_g).mean() * 100
         }
         
         ax3.bar(metrics.keys(), metrics.values(), color=['blue', 'green', 'red', 'orange'], alpha=0.7)
@@ -415,33 +438,40 @@ def visualise_data(file_path, height_cm=175, target_weight_kg=70, target_calorie
         # Calculate key insights
         recent_data = processed.tail(30)
         avg_weight_change = recent_data['Daily Weight change (kg)'].mean()
+        if pd.isna(avg_weight_change):
+            avg_weight_change = 0
         weight_trend = "losing" if avg_weight_change < -0.05 else "gaining" if avg_weight_change > 0.05 else "maintaining"
         
         strongest_predictor = weight_corrs.index[0] if len(weight_corrs) > 0 else "None"
         strongest_correlation = weight_corrs.iloc[0] if len(weight_corrs) > 0 else 0
         
         calorie_adherence = recent_data['On_track_calories'].mean() * 100
+        if pd.isna(calorie_adherence):
+            calorie_adherence = 0
         avg_deficit = recent_data['Calorie_deficit'].mean()
+        if pd.isna(avg_deficit):
+            avg_deficit = 0
         
         insights_text = f"""
+{{ ... }}
         📊 BODY COMPOSITION ANALYSIS SUMMARY
         
         🎯 CURRENT STATUS
         • Weight Trend: Currently {weight_trend} weight ({avg_weight_change:+.2f} kg/day average)
         • Current Weight: {current_weight:.1f} kg | Target: {target_weight_kg} kg
-        • Current BMI: {processed['BMI'].iloc[-1]:.1f} | Category: {get_bmi_category(processed['BMI'].iloc[-1])}
+        • Current BMI: {processed['BMI'].iloc[-1]:.1f} | Category: {get_bmi_category(processed['BMI'].iloc[-1]) if not pd.isna(processed['BMI'].iloc[-1]) else 'Unknown'}
         
         📈 KEY INSIGHTS (Last 30 Days)
         • Strongest Weight Predictor: {strongest_predictor} (correlation: {strongest_correlation:.3f})
         • Calorie Target Adherence: {calorie_adherence:.1f}%
         • Average Daily Deficit: {avg_deficit:+.0f} calories
-        • Weekend vs Weekday Difference: {weekend_data['Energy (kcal)'].mean() - weekday_data['Energy (kcal)'].mean():+.0f} calories
+        • Weekend vs Weekday Difference: {(weekend_data['Energy (kcal)'].mean() - weekday_data['Energy (kcal)'].mean()) if len(weekend_data) > 0 and len(weekday_data) > 0 else 0:+.0f} calories
         
         💡 RECOMMENDATIONS
         • {"Increase calorie intake" if avg_deficit > 500 else "Maintain current calorie level" if abs(avg_deficit) < 200 else "Reduce calorie intake"}
         • Focus on {strongest_predictor.lower()} as it shows strongest correlation with weight changes
-        • {"Improve weekend consistency" if abs(weekend_data['Energy (kcal)'].mean() - weekday_data['Energy (kcal)'].mean()) > 300 else "Good consistency between weekdays and weekends"}
-        • Current trajectory suggests reaching target weight in ~{abs((current_weight - target_weight_kg) / (avg_weight_change if abs(avg_weight_change) > 0.01 else 0.1)):.0f} days
+        • {"Improve weekend consistency" if len(weekend_data) > 0 and len(weekday_data) > 0 and abs(weekend_data['Energy (kcal)'].mean() - weekday_data['Energy (kcal)'].mean()) > 300 else "Good consistency between weekdays and weekends"}
+        • Current trajectory suggests reaching target weight in ~{abs((current_weight - target_weight_kg) / (avg_weight_change if abs(avg_weight_change) > 0.01 else 0.1)) if abs(avg_weight_change) > 0.001 else 'N/A'} days
         
         📋 SUMMARY TABLE
         """
@@ -463,7 +493,302 @@ def visualise_data(file_path, height_cm=175, target_weight_kg=70, target_calorie
         pdf.savefig(fig)
         plt.close(fig)
 
+        # 10. TDEE Analysis Dashboard
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+        
+        # TDEE estimates comparison
+        if tdee_estimates:
+            methods = []
+            values = []
+            colors = []
+            
+            method_colors = {
+                'weighted_average': '#2E8B57',  # Sea Green
+                'energy_balance_30d': '#4682B4',  # Steel Blue
+                'energy_balance_14d': '#6495ED',  # Cornflower Blue
+                'stable_weight_periods': '#FF6347',  # Tomato
+                'regression': '#9370DB',  # Medium Purple
+                'recent_30d': '#20B2AA'  # Light Sea Green
+            }
+            
+            for method, estimate in tdee_estimates.items():
+                if method not in ['stable_periods_count', 'regression_r2'] and isinstance(estimate, (int, float)) and 1200 < estimate < 4000:
+                    methods.append(method.replace('_', ' ').title())
+                    values.append(estimate)
+                    colors.append(method_colors.get(method, '#808080'))
+            
+            if methods:
+                bars = ax1.bar(range(len(methods)), values, color=colors, alpha=0.7)
+                ax1.set_xticks(range(len(methods)))
+                ax1.set_xticklabels(methods, rotation=45, ha='right')
+                ax1.set_title('TDEE Estimates by Method', fontsize=12, fontweight='bold')
+                ax1.set_ylabel('Calories per Day')
+                ax1.grid(True, alpha=0.3, axis='y')
+                
+                # Add value labels on bars
+                for bar, value in zip(bars, values):
+                    ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 20,
+                            f'{value:.0f}', ha='center', va='bottom', fontsize=9)
+        
+        # TDEE over time (rolling estimates)
+        if 'TDEE_7d' in processed.columns:
+            ax2.plot(processed['Date'], processed['TDEE_7d'], label='7-day TDEE', alpha=0.7, color='blue')
+            ax2.plot(processed['Date'], processed['TDEE_14d'], label='14-day TDEE', alpha=0.7, color='orange')
+            ax2.plot(processed['Date'], processed['TDEE_30d'], label='30-day TDEE', alpha=0.7, color='green')
+            
+            if 'weighted_average' in tdee_estimates:
+                ax2.axhline(y=tdee_estimates['weighted_average'], color='red', linestyle='--', 
+                           label=f'Est. TDEE: {tdee_estimates["weighted_average"]:.0f}')
+            
+            ax2.set_title('TDEE Estimates Over Time', fontsize=12, fontweight='bold')
+            ax2.set_ylabel('Calories per Day')
+            ax2.legend()
+            ax2.grid(True, alpha=0.3)
+            plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45)
+        
+        # Calorie intake vs TDEE comparison
+        recent_data = processed.tail(30)
+        avg_intake = recent_data['Energy (kcal)'].mean()
+        
+        if 'weighted_average' in tdee_estimates:
+            estimated_tdee = tdee_estimates['weighted_average']
+            surplus_deficit = avg_intake - estimated_tdee
+            
+            categories = ['Average Intake', 'Estimated TDEE']
+            values = [avg_intake, estimated_tdee]
+            colors = ['lightblue', 'lightcoral']
+            
+            bars = ax3.bar(categories, values, color=colors, alpha=0.7)
+            ax3.set_title('Intake vs TDEE (Last 30 Days)', fontsize=12, fontweight='bold')
+            ax3.set_ylabel('Calories per Day')
+            
+            # Add value labels
+            for bar, value in zip(bars, values):
+                ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 20,
+                        f'{value:.0f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+            
+            # Add surplus/deficit annotation
+            color = 'green' if surplus_deficit > 0 else 'red'
+            ax3.text(0.5, max(values) * 0.5, f'{"Surplus" if surplus_deficit > 0 else "Deficit"}:\n{abs(surplus_deficit):.0f} cal/day',
+                    ha='center', va='center', fontsize=12, fontweight='bold', color=color,
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor=color, alpha=0.2))
+        
+        # TDEE confidence and method summary
+        ax4.axis('off')
+        
+        if tdee_estimates:
+            summary_text = "🔥 TDEE ESTIMATION SUMMARY\n\n"
+            
+            if 'weighted_average' in tdee_estimates:
+                summary_text += f"📊 Best Estimate: {tdee_estimates['weighted_average']:.0f} cal/day\n\n"
+            
+            summary_text += "📈 Method Results:\n"
+            
+            method_names = {
+                'energy_balance_30d': '30-day Energy Balance',
+                'energy_balance_14d': '14-day Energy Balance',
+                'stable_weight_periods': 'Stable Weight Periods',
+                'regression': 'Regression Analysis',
+                'recent_30d': 'Recent 30 Days'
+            }
+            
+            for method, name in method_names.items():
+                if method in tdee_estimates and isinstance(tdee_estimates[method], (int, float)) and 1200 < tdee_estimates[method] < 4000:
+                    summary_text += f"• {name}: {tdee_estimates[method]:.0f} cal\n"
+            
+            if 'stable_periods_count' in tdee_estimates:
+                summary_text += f"\n📋 Data Quality:\n"
+                summary_text += f"• Stable weight periods: {tdee_estimates['stable_periods_count']}\n"
+            
+            if 'regression_r2' in tdee_estimates:
+                summary_text += f"• Regression R²: {tdee_estimates['regression_r2']:.3f}\n"
+            
+            summary_text += f"\n💡 Recommendations:\n"
+            if 'weighted_average' in tdee_estimates:
+                est_tdee = tdee_estimates['weighted_average']
+                if avg_intake > est_tdee + 200:
+                    summary_text += "• Consider reducing intake for weight loss\n"
+                elif avg_intake < est_tdee - 200:
+                    summary_text += "• Consider increasing intake\n"
+                else:
+                    summary_text += "• Current intake appears well-balanced\n"
+                
+                summary_text += f"• For weight loss: ~{est_tdee - 500:.0f} cal/day\n"
+                summary_text += f"• For weight gain: ~{est_tdee + 300:.0f} cal/day"
+            
+            ax4.text(0.05, 0.95, summary_text, transform=ax4.transAxes, fontsize=10,
+                    verticalalignment='top', fontfamily='monospace',
+                    bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow", alpha=0.8))
+        
+        plt.tight_layout()
+        pdf.savefig(fig)
+        plt.close(fig)
+
     return pdf_path
+
+def estimate_tdee(processed_data):
+    """
+    Estimate Total Daily Energy Expenditure using multiple methods.
+    
+    Args:
+        processed_data (DataFrame): Processed nutrition and weight data
+        
+    Returns:
+        dict: TDEE estimates from different methods
+    """
+    tdee_estimates = {}
+    
+    # Method 1: Energy Balance Method (most periods)
+    # TDEE = Calories In - (Weight Change × 7700 kcal/kg) / days
+    valid_data = processed_data.dropna(subset=['Energy (kcal)', 'Daily Weight change (kg)'])
+    
+    if len(valid_data) > 7:
+        # 7-day rolling TDEE calculation
+        def calculate_energy_balance_tdee(window_data):
+            if len(window_data) < 3:
+                return np.nan
+            
+            avg_calories = window_data['Energy (kcal)'].mean()
+            total_weight_change = window_data['Daily Weight change (kg)'].sum()
+            days = len(window_data)
+            
+            # 7700 kcal ≈ 1 kg of fat
+            weight_change_calories = total_weight_change * 7700 / days
+            tdee = avg_calories - weight_change_calories
+            
+            return tdee
+        
+        # Calculate rolling TDEE estimates using a different approach
+        def calculate_rolling_tdee(data, window_size, min_periods):
+            """Calculate rolling TDEE using energy balance method."""
+            tdee_values = []
+            
+            for i in range(len(data)):
+                start_idx = max(0, i - window_size + 1)
+                end_idx = i + 1
+                
+                if end_idx - start_idx < min_periods:
+                    tdee_values.append(np.nan)
+                    continue
+                
+                window_data = data.iloc[start_idx:end_idx]
+                avg_calories = window_data['Energy (kcal)'].mean()
+                total_weight_change = window_data['Daily Weight change (kg)'].sum()
+                days = len(window_data)
+                
+                # 7700 kcal ≈ 1 kg of fat
+                weight_change_calories = total_weight_change * 7700 / days
+                tdee = avg_calories - weight_change_calories
+                tdee_values.append(tdee)
+            
+            return pd.Series(tdee_values, index=data.index)
+        
+        energy_weight_data = processed_data[['Energy (kcal)', 'Daily Weight change (kg)']]
+        
+        # Calculate rolling TDEE estimates
+        processed_data['TDEE_7d'] = calculate_rolling_tdee(energy_weight_data, 7, 3)
+        processed_data['TDEE_14d'] = calculate_rolling_tdee(energy_weight_data, 14, 7)
+        processed_data['TDEE_30d'] = calculate_rolling_tdee(energy_weight_data, 30, 14)
+        
+        # Overall energy balance TDEE
+        avg_calories = valid_data['Energy (kcal)'].mean()
+        total_weight_change = valid_data['Daily Weight change (kg)'].sum()
+        days = len(valid_data)
+        weight_change_calories = total_weight_change * 7700 / days
+        
+        tdee_estimates['energy_balance'] = avg_calories - weight_change_calories
+        tdee_estimates['energy_balance_7d'] = processed_data['TDEE_7d'].dropna().mean()
+        tdee_estimates['energy_balance_14d'] = processed_data['TDEE_14d'].dropna().mean()
+        tdee_estimates['energy_balance_30d'] = processed_data['TDEE_30d'].dropna().mean()
+    
+    # Method 2: Stable Weight Periods
+    # Find periods where weight change is minimal (±0.2kg over 7 days)
+    if len(processed_data) > 7:
+        stable_periods = []
+        window_size = 7
+        
+        for i in range(len(processed_data) - window_size + 1):
+            window = processed_data.iloc[i:i+window_size]
+            weight_range = window['Weight (kg)'].max() - window['Weight (kg)'].min()
+            
+            if weight_range <= 0.4:  # ±0.2kg tolerance
+                avg_calories = window['Energy (kcal)'].mean()
+                if not np.isnan(avg_calories) and avg_calories > 0:
+                    stable_periods.append(avg_calories)
+        
+        if stable_periods:
+            tdee_estimates['stable_weight_periods'] = np.mean(stable_periods)
+            tdee_estimates['stable_periods_count'] = len(stable_periods)
+    
+    # Method 3: Regression Analysis
+    # Find calorie intake that results in zero weight change
+    if len(valid_data) > 14:
+        try:
+            from sklearn.linear_model import LinearRegression
+            
+            X = valid_data[['Energy (kcal)']].values
+            y = valid_data['Daily Weight change (kg)'].values
+            
+            model = LinearRegression()
+            model.fit(X, y)
+            
+            # Find calorie level where weight change = 0
+            if abs(model.coef_[0]) > 1e-6:  # Avoid division by zero
+                tdee_regression = -model.intercept_ / model.coef_[0]
+                if 1000 < tdee_regression < 5000:  # Sanity check
+                    tdee_estimates['regression'] = tdee_regression
+                    tdee_estimates['regression_r2'] = model.score(X, y)
+        except:
+            pass
+    
+    # Method 4: Recent Period Analysis (last 30 days)
+    recent_data = processed_data.tail(30)
+    recent_valid = recent_data.dropna(subset=['Energy (kcal)', 'Daily Weight change (kg)'])
+    
+    if len(recent_valid) > 7:
+        avg_calories = recent_valid['Energy (kcal)'].mean()
+        total_weight_change = recent_valid['Daily Weight change (kg)'].sum()
+        days = len(recent_valid)
+        weight_change_calories = total_weight_change * 7700 / days
+        
+        tdee_estimates['recent_30d'] = avg_calories - weight_change_calories
+    
+    # Calculate confidence-weighted average
+    if tdee_estimates:
+        # Weight different methods based on data quality and period length
+        weights = {}
+        values = {}
+        
+        if 'energy_balance_30d' in tdee_estimates:
+            weights['energy_balance_30d'] = 0.3
+            values['energy_balance_30d'] = tdee_estimates['energy_balance_30d']
+        
+        if 'energy_balance_14d' in tdee_estimates:
+            weights['energy_balance_14d'] = 0.25
+            values['energy_balance_14d'] = tdee_estimates['energy_balance_14d']
+        
+        if 'stable_weight_periods' in tdee_estimates:
+            weights['stable_weight_periods'] = 0.2
+            values['stable_weight_periods'] = tdee_estimates['stable_weight_periods']
+        
+        if 'regression' in tdee_estimates and tdee_estimates.get('regression_r2', 0) > 0.1:
+            weights['regression'] = 0.15
+            values['regression'] = tdee_estimates['regression']
+        
+        if 'recent_30d' in tdee_estimates:
+            weights['recent_30d'] = 0.1
+            values['recent_30d'] = tdee_estimates['recent_30d']
+        
+        if values:
+            # Filter out unrealistic values
+            realistic_values = {k: v for k, v in values.items() if 1200 < v < 4000}
+            
+            if realistic_values:
+                weighted_sum = sum(realistic_values[k] * weights.get(k, 0.1) for k in realistic_values)
+                total_weight = sum(weights.get(k, 0.1) for k in realistic_values)
+                tdee_estimates['weighted_average'] = weighted_sum / total_weight
+    
+    return tdee_estimates
 
 def get_bmi_category(bmi):
     """Return BMI category based on value."""

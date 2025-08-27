@@ -66,6 +66,13 @@ x-airflow-common:
     AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
     CRONOMETER_USERNAME: ${CRONOMETER_USERNAME}
     CRONOMETER_PASSWORD: ${CRONOMETER_PASSWORD}
+    # Visualization parameters
+    USER_HEIGHT_CM: ${USER_HEIGHT_CM}
+    TARGET_WEIGHT_KG: ${TARGET_WEIGHT_KG}
+    TARGET_CALORIES: ${TARGET_CALORIES}
+    PROTEIN_GOAL_G: ${PROTEIN_GOAL_G}
+    FIBER_GOAL_G: ${FIBER_GOAL_G}
+    CALORIE_TOLERANCE_PCT: ${CALORIE_TOLERANCE_PCT}
     # yamllint disable rule:line-length
     # Use simple http server on scheduler for health checks
     # See https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/check-health.html#scheduler-health-check-server

@@ -34,8 +34,8 @@ def csv_processing_dag():
 
     @task
     def visualise_data(file_path: str):
-        # Default parameters - can be made configurable via Airflow Variables
-        return visualise_data_func(file_path, height_cm=175, target_weight_kg=70, target_calories=2000)
+        # Parameters are now loaded from environment variables in the function
+        return visualise_data_func(file_path)
 
     @task
     def upload_to_s3(file_path: str, bucket_name: str):
