@@ -30,7 +30,7 @@ def process_csv(file_path1, file_path2):
     processed = pd.merge(nutrition, bio_cleaned, how="left")
 
     # Fill Weight (kg) with previous value since 0 will disrupt the analysis
-    processed["Weight (kg)"] = processed["Weight (kg)"].fillna(method="backfill")
+    processed["Weight (kg)"] = processed["Weight (kg)"].bfill()
     
     # Fill any missing values with 0
     processed = processed.fillna(0)

@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import seaborn as sns
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.colors import LinearSegmentedColormap
 from datetime import datetime, timedelta
 import numpy as np
 from scipy import stats
@@ -313,35 +314,84 @@ def visualise_data(file_path):
         pdf.savefig(fig)
         plt.close(fig)
 
-        # 6. Enhanced Nutrient Analysis
-        fig, axes = plt.subplots(2, 4, figsize=(20, 10))
-        axes = axes.flatten()
+        # 6. Consolidated Nutrient Analysis
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
         
-        for i, nutrient in enumerate(nutrients):
-            ax = axes[i]
-            # Enhanced scatter plot with trend line
-            ax.scatter(processed[nutrient], processed['Daily Weight change (kg)'], alpha=0.6, color='blue')
-            
-            # Add trend line if correlation exists
-            valid_data = ~(processed[nutrient].isna() | processed['Daily Weight change (kg)'].isna())
-            if valid_data.sum() > 1:
-                slope, intercept, r_value, p_value, std_err = stats.linregress(
-                    processed[nutrient][valid_data], processed['Daily Weight change (kg)'][valid_data]
+        # Define colors for each nutrient
+        nutrient_colors = {
+            'Energy (kcal)': '#e74c3c',      # Red
+            'Protein (g)': '#3498db',         # Blue
+            'Carbs (g)': '#f39c12',           # Orange
+            'Fat (g)': '#9b59b6',             # Purple
+            'Fiber (g)': '#2ecc71',           # Green
+            'Sodium (mg)': '#1abc9c',         # Teal
+            'Water (g)': '#34495e'            # Dark Gray
+        }
+        
+        # Top chart: Rolling 14-day correlations between each nutrient and weight change
+        window_size = 14
+        for nutrient in nutrients:
+            # Calculate rolling correlation
+            rolling_corr = processed[nutrient].rolling(window_size).corr(
+                processed['Daily Weight change (kg)']
+            )
+            ax1.plot(processed['Date'], rolling_corr, 
+                    label=nutrient.replace(' (', '\n('), 
+                    color=nutrient_colors.get(nutrient, 'gray'),
+                    linewidth=1.5, alpha=0.8)
+        
+        ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+        ax1.axhline(y=0.3, color='green', linestyle='--', alpha=0.3, label='Strong +')
+        ax1.axhline(y=-0.3, color='red', linestyle='--', alpha=0.3, label='Strong -')
+        ax1.set_title('Rolling 14-Day Correlation: Nutrients vs Weight Change', 
+                     fontsize=12, fontweight='bold')
+        ax1.set_ylabel('Correlation Coefficient')
+        ax1.set_ylim(-1, 1)
+        ax1.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=8)
+        ax1.grid(True, alpha=0.3)
+        plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45)
+        
+        # Bottom chart: Static correlation bar chart with significance
+        correlations_list = []
+        for nutrient in nutrients:
+            valid_mask = ~(processed[nutrient].isna() | processed['Daily Weight change (kg)'].isna())
+            if valid_mask.sum() > 2:
+                corr, p_value = stats.pearsonr(
+                    processed[nutrient][valid_mask], 
+                    processed['Daily Weight change (kg)'][valid_mask]
                 )
-                x_trend = np.linspace(processed[nutrient].min(), processed[nutrient].max(), 100)
-                y_trend = slope * x_trend + intercept
-                ax.plot(x_trend, y_trend, 'r--', alpha=0.8, 
-                       label=f'R²={r_value**2:.3f}')
-                ax.legend()
-            
-            ax.set_title(f'Weight Change vs {nutrient}', fontsize=10, fontweight='bold')
-            ax.set_xlabel(nutrient)
-            ax.set_ylabel('Daily Weight Change (kg)')
-            ax.grid(True, alpha=0.3)
+                correlations_list.append({
+                    'nutrient': nutrient,
+                    'correlation': corr,
+                    'p_value': p_value,
+                    'significant': p_value < 0.05
+                })
         
-        # Hide unused subplot
-        if len(nutrients) < len(axes):
-            axes[-1].set_visible(False)
+        # Sort by absolute correlation
+        correlations_list.sort(key=lambda x: abs(x['correlation']), reverse=True)
+        
+        # Create horizontal bar chart
+        y_positions = range(len(correlations_list))
+        bar_colors = [nutrient_colors.get(item['nutrient'], 'gray') for item in correlations_list]
+        edge_colors = ['black' if item['significant'] else 'none' for item in correlations_list]
+        
+        bars = ax2.barh(y_positions, [item['correlation'] for item in correlations_list],
+                       color=bar_colors, alpha=0.7, edgecolor=edge_colors, linewidth=2)
+        
+        ax2.set_yticks(y_positions)
+        ax2.set_yticklabels([item['nutrient'] for item in correlations_list])
+        ax2.axvline(x=0, color='black', linestyle='-', alpha=0.5)
+        ax2.set_xlabel('Correlation with Daily Weight Change')
+        ax2.set_title('Overall Nutrient-Weight Correlations (black border = statistically significant)', 
+                     fontsize=12, fontweight='bold')
+        ax2.set_xlim(-0.5, 0.5)
+        ax2.grid(True, alpha=0.3, axis='x')
+        
+        # Add correlation values on bars
+        for i, item in enumerate(correlations_list):
+            x_pos = item['correlation'] + (0.02 if item['correlation'] >= 0 else -0.02)
+            ha = 'left' if item['correlation'] >= 0 else 'right'
+            ax2.text(x_pos, i, f"{item['correlation']:.3f}", va='center', ha=ha, fontsize=9)
         
         plt.tight_layout()
         pdf.savefig(fig)
@@ -431,7 +481,112 @@ def visualise_data(file_path):
         pdf.savefig(fig)
         plt.close(fig)
 
-        # 9. Summary Insights and Recommendations
+        # 9. Calorie Adherence Calendar Heatmap
+        fig, ax = plt.subplots(figsize=(16, 10))
+        
+        # Prepare calendar data - last 12 months or all available data
+        calendar_data = processed[['Date', 'On_track_calories', 'Energy (kcal)', 'Calorie_deficit']].copy()
+        calendar_data['Year'] = calendar_data['Date'].dt.year
+        calendar_data['Month'] = calendar_data['Date'].dt.month
+        calendar_data['Day'] = calendar_data['Date'].dt.day
+        calendar_data['Week'] = calendar_data['Date'].dt.isocalendar().week
+        calendar_data['Weekday'] = calendar_data['Date'].dt.weekday  # 0=Monday, 6=Sunday
+        
+        # Create adherence status: 1=on track, 0.5=under, 0=over
+        def get_adherence_status(row):
+            if row['On_track_calories']:
+                return 1.0  # On track (green)
+            elif row['Calorie_deficit'] > 0:
+                return 0.5  # Under target (yellow)
+            else:
+                return 0.0  # Over target (red)
+        
+        calendar_data['Status'] = calendar_data.apply(get_adherence_status, axis=1)
+        
+        # Get the last 6 months of data for cleaner visualization
+        six_months_ago = calendar_data['Date'].max() - timedelta(days=180)
+        recent_calendar = calendar_data[calendar_data['Date'] >= six_months_ago].copy()
+        
+        if len(recent_calendar) > 0:
+            # Create a pivot for the heatmap - weeks as columns, weekdays as rows
+            # Group by year-week to handle year boundaries
+            recent_calendar['YearWeek'] = recent_calendar['Date'].dt.strftime('%Y-W%V')
+            
+            # Create matrix for heatmap
+            unique_weeks = recent_calendar['YearWeek'].unique()
+            week_order = sorted(unique_weeks)
+            
+            # Create empty matrix (7 weekdays x number of weeks)
+            heatmap_matrix = np.full((7, len(week_order)), np.nan)
+            
+            for _, row in recent_calendar.iterrows():
+                week_idx = week_order.index(row['YearWeek'])
+                weekday_idx = row['Weekday']
+                heatmap_matrix[weekday_idx, week_idx] = row['Status']
+            
+            # Create custom colormap: red (over) -> yellow (under) -> green (on track)
+            colors_list = ['#e74c3c', '#f39c12', '#2ecc71']  # Red, Yellow, Green
+            cmap = LinearSegmentedColormap.from_list('adherence', colors_list, N=256)
+            
+            # Plot heatmap
+            im = ax.imshow(heatmap_matrix, cmap=cmap, aspect='auto', vmin=0, vmax=1)
+            
+            # Set labels
+            weekday_labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+            ax.set_yticks(range(7))
+            ax.set_yticklabels(weekday_labels)
+            
+            # Show month labels instead of week numbers
+            month_positions = []
+            month_labels = []
+            current_month = None
+            for i, week in enumerate(week_order):
+                # Parse week to get approximate month
+                week_dates = recent_calendar[recent_calendar['YearWeek'] == week]['Date']
+                if len(week_dates) > 0:
+                    month = week_dates.iloc[0].strftime('%b %Y')
+                    if month != current_month:
+                        month_positions.append(i)
+                        month_labels.append(month)
+                        current_month = month
+            
+            ax.set_xticks(month_positions)
+            ax.set_xticklabels(month_labels, rotation=45, ha='right')
+            
+            # Add colorbar legend
+            cbar = plt.colorbar(im, ax=ax, shrink=0.5, aspect=20)
+            cbar.set_ticks([0, 0.5, 1])
+            cbar.set_ticklabels(['Over Target', 'Under Target', 'On Track'])
+            
+            # Calculate summary statistics
+            total_days = len(recent_calendar)
+            on_track_days = (recent_calendar['Status'] == 1.0).sum()
+            under_days = (recent_calendar['Status'] == 0.5).sum()
+            over_days = (recent_calendar['Status'] == 0.0).sum()
+            
+            # Add summary text
+            summary_text = (
+                f"Last 6 Months Summary:\n"
+                f"✅ On Track: {on_track_days} days ({on_track_days/total_days*100:.1f}%)\n"
+                f"⚠️ Under Target: {under_days} days ({under_days/total_days*100:.1f}%)\n"
+                f"❌ Over Target: {over_days} days ({over_days/total_days*100:.1f}%)"
+            )
+            ax.text(1.15, 0.5, summary_text, transform=ax.transAxes, fontsize=11,
+                   verticalalignment='center', fontfamily='monospace',
+                   bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.9))
+            
+            ax.set_title('Calorie Adherence Calendar Heatmap (Last 6 Months)', 
+                        fontsize=14, fontweight='bold')
+        else:
+            ax.text(0.5, 0.5, 'Insufficient data for calendar heatmap', 
+                   transform=ax.transAxes, ha='center', va='center', fontsize=14)
+            ax.set_title('Calorie Adherence Calendar Heatmap', fontsize=14, fontweight='bold')
+        
+        plt.tight_layout()
+        pdf.savefig(fig)
+        plt.close(fig)
+
+        # 10. Summary Insights and Recommendations
         fig, ax = plt.subplots(figsize=(12, 8))
         ax.axis('off')
         
@@ -493,7 +648,7 @@ def visualise_data(file_path):
         pdf.savefig(fig)
         plt.close(fig)
 
-        # 10. TDEE Analysis Dashboard
+        # 11. TDEE Analysis Dashboard
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
         
         # TDEE estimates comparison

@@ -2,6 +2,9 @@ from airflow.decorators import dag, task
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.utils.trigger_rule import TriggerRule
 from datetime import timedelta, datetime
+from airflow.operators.empty import EmptyOperator
+import os
+from dotenv import load_dotenv
 from process_csv import process_csv as process_csv_func
 from visualisation import visualise_data as visualise_data_func
 from upload_s3 import upload_to_s3 as upload_to_s3_func
@@ -19,6 +22,8 @@ default_args = {
 
 @dag(default_args=default_args, schedule_interval='@daily', start_date=datetime(2023,1,1), catchup=False)
 def csv_processing_dag():
+    # Load .env for local runs; in Docker these come from environment
+    load_dotenv()
 
     @task
     def remove_files():
@@ -50,7 +55,16 @@ def csv_processing_dag():
     fetch_task = fetch_cronometer_data()
     process_task = process_csv(file_path1, file_path2)
     visualisation_task = visualise_data(process_task)
-    upload_task = upload_to_s3(visualisation_task, 'airflow-cronometer')
+
+    # Toggle S3 upload via env flag (UPLOAD_TO_S3=true/false)
+    upload_enabled = str(os.getenv('UPLOAD_TO_S3', 'false')).strip().lower() in ('1', 'true', 'yes', 'on')
+    bucket_name = os.getenv('S3_BUCKET_NAME', 'airflow-cronometer')
+
+    if upload_enabled:
+        upload_task = upload_to_s3(visualisation_task, bucket_name)
+    else:
+        # No-op task to keep downstream chaining intact when upload is disabled
+        upload_task = EmptyOperator(task_id='skip_upload_to_s3')
 
     remove_task >> fetch_task >> process_task >> visualisation_task >> upload_task
 
