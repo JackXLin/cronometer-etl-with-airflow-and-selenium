@@ -5,7 +5,54 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import os
 import time
+import glob
 from dotenv import load_dotenv
+
+# Constants for download timeout
+DOWNLOAD_TIMEOUT_SECONDS = 300  # 5 minutes
+DOWNLOAD_CHECK_INTERVAL_SECONDS = 5  # Check every 5 seconds
+
+
+def wait_for_file_download(download_dir, filename_pattern, timeout=DOWNLOAD_TIMEOUT_SECONDS):
+    """
+    Wait for a file matching the pattern to appear in the download directory.
+
+    Args:
+        download_dir (str): Directory where files are downloaded.
+        filename_pattern (str): Glob pattern to match the file (e.g., '*daily*.csv').
+        timeout (int): Maximum time to wait in seconds (default: 300 = 5 minutes).
+
+    Returns:
+        str: Path to the downloaded file if found, None otherwise.
+    """
+    start_time = time.time()
+    search_pattern = os.path.join(download_dir, filename_pattern)
+    
+    print(f"Waiting for file matching '{filename_pattern}' in {download_dir}...")
+    print(f"Timeout set to {timeout} seconds ({timeout // 60} minutes)")
+    
+    while time.time() - start_time < timeout:
+        # Check for matching files (excluding partial downloads)
+        matching_files = glob.glob(search_pattern)
+        # Filter out partial downloads (.part, .crdownload, .tmp files)
+        complete_files = [
+            f for f in matching_files 
+            if not f.endswith(('.part', '.crdownload', '.tmp'))
+        ]
+        
+        if complete_files:
+            # Get the most recently modified file
+            latest_file = max(complete_files, key=os.path.getmtime)
+            elapsed = time.time() - start_time
+            print(f"File found: {latest_file} (after {elapsed:.1f} seconds)")
+            return latest_file
+        
+        elapsed = time.time() - start_time
+        print(f"Waiting for download... ({elapsed:.0f}/{timeout} seconds)")
+        time.sleep(DOWNLOAD_CHECK_INTERVAL_SECONDS)
+    
+    print(f"Timeout: File not found after {timeout} seconds")
+    return None
 
 def select_all_time(driver, wait):
     # Locate the dropdown button using a suitable XPath
@@ -119,7 +166,17 @@ def cronometer_export():
         driver.execute_script("arguments[0].scrollIntoView(true);", export_daily_nutrition_button)
         driver.execute_script("arguments[0].click();", export_daily_nutrition_button)
 
-        time.sleep(5)
+        # Wait for daily summary CSV to download (up to 5 minutes)
+        daily_summary_file = wait_for_file_download(
+            download_dir, 
+            '*daily*.csv',  # Matches dailysummary.csv or daily-summary.csv
+            timeout=DOWNLOAD_TIMEOUT_SECONDS
+        )
+        
+        if daily_summary_file is None:
+            print("ERROR: Daily summary CSV download failed or timed out!")
+            driver.save_screenshot('daily_summary_download_failed.png')
+            raise TimeoutError("Daily summary CSV download timed out after 5 minutes")
 
         # Re-select "All Time" for the second export
         # Scroll the "Export Data" button into view and click it
@@ -138,7 +195,17 @@ def cronometer_export():
         driver.execute_script("arguments[0].scrollIntoView(true);", export_biometrics_button)
         driver.execute_script("arguments[0].click();", export_biometrics_button)
 
-        time.sleep(5)
+        # Wait for biometrics CSV to download (up to 5 minutes)
+        biometrics_file = wait_for_file_download(
+            download_dir,
+            '*biometric*.csv',  # Matches biometrics.csv
+            timeout=DOWNLOAD_TIMEOUT_SECONDS
+        )
+        
+        if biometrics_file is None:
+            print("ERROR: Biometrics CSV download failed or timed out!")
+            driver.save_screenshot('biometrics_download_failed.png')
+            raise TimeoutError("Biometrics CSV download timed out after 5 minutes")
 
         # Print a confirmation message
         print("Downloaded CSVs successfully!")
