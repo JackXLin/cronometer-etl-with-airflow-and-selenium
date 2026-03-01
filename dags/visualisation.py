@@ -1,8 +1,7 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib.colors import LinearSegmentedColormap
-from datetime import datetime, timedelta
+from datetime import datetime
 import numpy as np
 import warnings
 import os
@@ -12,13 +11,18 @@ from visualisation_helpers import (
     get_bmi_category,
     prepare_metrics,
     compute_nutrient_correlations,
+    compute_lagged_correlations,
+    compute_correlation_ci,
     build_key_figures_table,
+    draw_weekly_waterfall,
+    draw_adherence_calendar,
 )
 from visualisation_pages import (
     page_weight_prediction,
     page_tdee_dashboard,
     page_energy_macros,
 )
+from visualisation_goals import page_goal_progress
 
 warnings.filterwarnings("ignore")
 
@@ -48,6 +52,7 @@ def visualise_data(file_path: str) -> str:
         4. Nutrient-Weight Correlations
         5. Behavioural Patterns & Adherence Calendar
         6. Key Figures Table & Summary
+        7. Goal Progress & Calorie Budget Burn-down
 
     Args:
         file_path (str): Path to the processed CSV file.
@@ -86,7 +91,9 @@ def visualise_data(file_path: str) -> str:
         page_weight_prediction(
             pdf, processed, target_weight_kg, tdee_estimates, height_cm,
         )
-        page_tdee_dashboard(pdf, processed, tdee_estimates, target_calories)
+        page_tdee_dashboard(
+            pdf, processed, tdee_estimates, target_calories, target_weight_kg,
+        )
         page_energy_macros(
             pdf, processed, target_calories, calorie_tolerance_pct,
         )
@@ -96,73 +103,127 @@ def visualise_data(file_path: str) -> str:
             pdf, processed, tdee_estimates, target_weight_kg, target_calories,
             protein_goal_g, fiber_goal_g, height_cm,
         )
+        page_goal_progress(
+            pdf, processed, target_weight_kg, tdee_estimates,
+        )
 
     return pdf_path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PAGE 4 — Nutrient-Weight Correlations
+# PAGE 4 — What Drives Your Weight Change?
 # ─────────────────────────────────────────────────────────────────────────────
 def _page_nutrient_correlations(pdf, processed):
     """
-    Top:    Rolling 14-day correlations between each nutrient and weight change.
-    Bottom: Static Pearson correlation bar chart with significance borders.
+    Top:    Lagged correlation heatmap (nutrients × lag days 0-3).
+    Bottom: Enhanced bar chart with 95% CI whiskers and significance.
 
     Args:
         pdf: PdfPages object.
         processed (pd.DataFrame): Full dataset.
     """
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 11))
 
-    # Rolling correlations
-    window = 14
-    for nutrient in NUTRIENTS:
-        rc = processed[nutrient].rolling(window).corr(
-            processed["Daily Weight change (kg)"]
+    # --- Top: Lagged correlation heatmap ---
+    lagged = compute_lagged_correlations(processed, NUTRIENTS, max_lag=3)
+    lag_cols = [c for c in lagged.columns if c.startswith("lag_")]
+
+    # Build numeric matrix and significance mask
+    r_matrix = np.full((len(NUTRIENTS), len(lag_cols)), np.nan)
+    sig_mask = np.full((len(NUTRIENTS), len(lag_cols)), False)
+    for i, nutrient in enumerate(NUTRIENTS):
+        if nutrient in lagged.index:
+            for j, col in enumerate(lag_cols):
+                cell = lagged.loc[nutrient, col]
+                if isinstance(cell, dict):
+                    r_matrix[i, j] = cell["r"]
+                    sig_mask[i, j] = cell["significant"]
+
+    # Reason: diverging colormap centred on 0 makes positive/negative
+    # correlations immediately distinguishable.
+    from matplotlib.colors import TwoSlopeNorm
+    norm = TwoSlopeNorm(vmin=-0.4, vcenter=0, vmax=0.4)
+    im = ax1.imshow(r_matrix, cmap="RdBu_r", norm=norm, aspect="auto")
+
+    ax1.set_xticks(range(len(lag_cols)))
+    ax1.set_xticklabels([f"Same day" if i == 0 else f"+{i} day{'s' if i > 1 else ''}"
+                         for i in range(len(lag_cols))], fontsize=10)
+    ax1.set_yticks(range(len(NUTRIENTS)))
+    ax1.set_yticklabels(NUTRIENTS, fontsize=10)
+
+    # Annotate each cell with r value and significance asterisk
+    for i in range(len(NUTRIENTS)):
+        for j in range(len(lag_cols)):
+            val = r_matrix[i, j]
+            if not np.isnan(val):
+                star = "*" if sig_mask[i, j] else ""
+                color = "white" if abs(val) > 0.25 else "black"
+                ax1.text(j, i, f"{val:.3f}{star}", ha="center", va="center",
+                         fontsize=9, fontweight="bold" if star else "normal",
+                         color=color)
+
+    cbar = plt.colorbar(im, ax=ax1, shrink=0.7, aspect=25)
+    cbar.set_label("Pearson r", fontsize=10)
+    ax1.set_title(
+        "What Drives Your Weight Change? (Lagged Correlations, * = p < 0.05)",
+        fontsize=13, fontweight="bold",
+    )
+    ax1.set_xlabel("Lag (nutrient intake day → weight change day)")
+
+    # --- Bottom: Enhanced bar chart with 95% CI ---
+    corrs_ci = compute_correlation_ci(processed, NUTRIENTS)
+
+    if corrs_ci:
+        y_pos = range(len(corrs_ci))
+        r_vals = [c["correlation"] for c in corrs_ci]
+        ci_low = [c["ci_low"] for c in corrs_ci]
+        ci_high = [c["ci_high"] for c in corrs_ci]
+        # Reason: xerr expects distances from the bar value, not absolute positions.
+        xerr_neg = [r - lo for r, lo in zip(r_vals, ci_low)]
+        xerr_pos = [hi - r for r, hi in zip(r_vals, ci_high)]
+
+        bar_colors = []
+        bar_alphas = []
+        for c in corrs_ci:
+            base = NUTRIENT_COLORS.get(c["nutrient"], "gray")
+            bar_colors.append(base)
+            bar_alphas.append(0.85 if c["significant"] else 0.35)
+
+        bars = ax2.barh(
+            y_pos, r_vals, color=bar_colors, edgecolor="black", linewidth=1.2,
         )
-        ax1.plot(processed["Date"], rc,
-                 label=nutrient.replace(" (", "\n("),
-                 color=NUTRIENT_COLORS.get(nutrient, "gray"),
-                 linewidth=1.5, alpha=0.8)
+        # Apply per-bar alpha
+        for bar, alpha in zip(bars, bar_alphas):
+            bar.set_alpha(alpha)
 
-    ax1.axhline(y=0, color="black", linestyle="-", alpha=0.3)
-    ax1.axhline(y=0.3, color="green", linestyle="--", alpha=0.3,
-                label="Strong +")
-    ax1.axhline(y=-0.3, color="red", linestyle="--", alpha=0.3,
-                label="Strong -")
-    ax1.set_title("Rolling 14-Day Correlation: Nutrients vs Weight Change",
-                  fontsize=12, fontweight="bold")
-    ax1.set_ylabel("Correlation Coefficient")
-    ax1.set_ylim(-1, 1)
-    ax1.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
-    ax1.grid(True, alpha=0.3)
-    plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45)
+        ax2.errorbar(
+            r_vals, y_pos, xerr=[xerr_neg, xerr_pos],
+            fmt="none", ecolor="black", elinewidth=1.5, capsize=4,
+        )
 
-    # Static bar chart
-    corrs = compute_nutrient_correlations(processed, NUTRIENTS)
+        ax2.set_yticks(y_pos)
+        labels = []
+        for c in corrs_ci:
+            sig_marker = " **" if c["significant"] else " (ns)"
+            labels.append(f"{c['nutrient']}{sig_marker}")
+        ax2.set_yticklabels(labels, fontsize=10)
 
-    y_pos = range(len(corrs))
-    bar_c = [NUTRIENT_COLORS.get(c["nutrient"], "gray") for c in corrs]
-    edge_c = ["black" if c["significant"] else "none" for c in corrs]
+        ax2.axvline(x=0, color="black", linestyle="-", alpha=0.5)
+        ax2.set_xlabel("Correlation with Daily Weight Change")
+        ax2.set_xlim(-0.5, 0.5)
+        ax2.grid(True, alpha=0.3, axis="x")
 
-    ax2.barh(y_pos, [c["correlation"] for c in corrs],
-             color=bar_c, alpha=0.7, edgecolor=edge_c, linewidth=2)
-    ax2.set_yticks(y_pos)
-    ax2.set_yticklabels([c["nutrient"] for c in corrs])
-    ax2.axvline(x=0, color="black", linestyle="-", alpha=0.5)
-    ax2.set_xlabel("Correlation with Daily Weight Change")
+        # Annotate r value and sample size
+        for i, c in enumerate(corrs_ci):
+            xp = c["correlation"] + (0.03 if c["correlation"] >= 0 else -0.03)
+            ha = "left" if c["correlation"] >= 0 else "right"
+            ax2.text(xp, i, f'r={c["correlation"]:.3f} (n={c["n"]})',
+                     va="center", ha=ha, fontsize=9)
+
     ax2.set_title(
-        "Nutrient-Weight Correlations (black border = p < 0.05)",
+        "Nutrient-Weight Correlations with 95% CI (faded = not significant)",
         fontsize=12, fontweight="bold",
     )
-    ax2.set_xlim(-0.5, 0.5)
-    ax2.grid(True, alpha=0.3, axis="x")
-
-    for i, c in enumerate(corrs):
-        xp = c["correlation"] + (0.02 if c["correlation"] >= 0 else -0.02)
-        ha = "left" if c["correlation"] >= 0 else "right"
-        ax2.text(xp, i, f'{c["correlation"]:.3f}', va="center", ha=ha,
-                 fontsize=9)
 
     plt.tight_layout()
     pdf.savefig(fig)
@@ -174,7 +235,7 @@ def _page_nutrient_correlations(pdf, processed):
 # ─────────────────────────────────────────────────────────────────────────────
 def _page_behavioural_patterns(pdf, processed, target_calories):
     """
-    Top-left:  Weekday vs Weekend intake comparison.
+    Top-left:  Weekly weight change waterfall chart.
     Top-right: Weight change distribution histogram.
     Bottom:    Calorie adherence calendar heatmap (last 6 months).
 
@@ -184,24 +245,12 @@ def _page_behavioural_patterns(pdf, processed, target_calories):
         target_calories (int): Daily calorie target.
     """
     fig = plt.figure(figsize=(16, 12))
-    ax_wk = fig.add_subplot(2, 2, 1)
+    ax_wf = fig.add_subplot(2, 2, 1)
     ax_hist = fig.add_subplot(2, 2, 2)
     ax_cal = fig.add_subplot(2, 1, 2)
 
-    # --- Weekday vs Weekend ---
-    weekday = processed[~processed["Is_weekend"]]
-    weekend = processed[processed["Is_weekend"]]
-    cats = ["Energy (kcal)", "Protein (g)", "Carbs (g)", "Fat (g)"]
-    wd_means = [weekday[c].mean() for c in cats]
-    we_means = [weekend[c].mean() for c in cats]
-    x = np.arange(len(cats))
-    w = 0.35
-    ax_wk.bar(x - w / 2, wd_means, w, label="Weekdays", alpha=0.7)
-    ax_wk.bar(x + w / 2, we_means, w, label="Weekends", alpha=0.7)
-    ax_wk.set_title("Weekday vs Weekend Intake", fontsize=12, fontweight="bold")
-    ax_wk.set_xticks(x)
-    ax_wk.set_xticklabels(cats, rotation=45, ha="right")
-    ax_wk.legend()
+    # --- Weekly Weight Change Waterfall ---
+    draw_weekly_waterfall(ax_wf, processed)
 
     # --- Weight change distribution ---
     wc = processed["Daily Weight change (kg)"].dropna()
@@ -213,91 +262,11 @@ def _page_behavioural_patterns(pdf, processed, target_calories):
     ax_hist.set_ylabel("Frequency")
 
     # --- Calendar heatmap ---
-    _draw_adherence_calendar(ax_cal, processed)
+    draw_adherence_calendar(ax_cal, processed)
 
     plt.tight_layout()
     pdf.savefig(fig)
     plt.close(fig)
-
-
-def _draw_adherence_calendar(ax, processed):
-    """
-    Draw a GitHub-style calorie adherence calendar heatmap on the given axis.
-
-    Args:
-        ax: Matplotlib axis.
-        processed (pd.DataFrame): Must contain Date, On_track_calories,
-            Calorie_deficit columns.
-    """
-    cal = processed[["Date", "On_track_calories", "Calorie_deficit"]].copy()
-    cal["Weekday"] = cal["Date"].dt.weekday
-
-    def status(row):
-        """Map adherence to 0/0.5/1 for colouring."""
-        if row["On_track_calories"]:
-            return 1.0
-        return 0.5 if row["Calorie_deficit"] > 0 else 0.0
-
-    cal["Status"] = cal.apply(status, axis=1)
-
-    six_m = cal["Date"].max() - timedelta(days=180)
-    recent = cal[cal["Date"] >= six_m].copy()
-
-    if len(recent) == 0:
-        ax.text(0.5, 0.5, "Insufficient data", transform=ax.transAxes,
-                ha="center", va="center", fontsize=14)
-        ax.set_title("Calorie Adherence Calendar", fontsize=14,
-                     fontweight="bold")
-        return
-
-    recent["YearWeek"] = recent["Date"].dt.strftime("%Y-W%V")
-    weeks = sorted(recent["YearWeek"].unique())
-    matrix = np.full((7, len(weeks)), np.nan)
-
-    for _, row in recent.iterrows():
-        wi = weeks.index(row["YearWeek"])
-        matrix[row["Weekday"], wi] = row["Status"]
-
-    cmap = LinearSegmentedColormap.from_list(
-        "adh", ["#e74c3c", "#f39c12", "#2ecc71"], N=256,
-    )
-    im = ax.imshow(matrix, cmap=cmap, aspect="auto", vmin=0, vmax=1)
-    ax.set_yticks(range(7))
-    ax.set_yticklabels(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
-
-    # Month tick labels
-    positions, labels = [], []
-    cur_month = None
-    for i, wk in enumerate(weeks):
-        dates = recent[recent["YearWeek"] == wk]["Date"]
-        if len(dates) > 0:
-            m = dates.iloc[0].strftime("%b %Y")
-            if m != cur_month:
-                positions.append(i)
-                labels.append(m)
-                cur_month = m
-    ax.set_xticks(positions)
-    ax.set_xticklabels(labels, rotation=45, ha="right")
-
-    cbar = plt.colorbar(im, ax=ax, shrink=0.5, aspect=20)
-    cbar.set_ticks([0, 0.5, 1])
-    cbar.set_ticklabels(["Over Target", "Under Target", "On Track"])
-
-    total = len(recent)
-    on = (recent["Status"] == 1.0).sum()
-    under = (recent["Status"] == 0.5).sum()
-    over = (recent["Status"] == 0.0).sum()
-    summary = (
-        f"Last 6 Months:\n"
-        f"On Track: {on} days ({on / total * 100:.1f}%)\n"
-        f"Under:    {under} days ({under / total * 100:.1f}%)\n"
-        f"Over:     {over} days ({over / total * 100:.1f}%)"
-    )
-    ax.text(1.15, 0.5, summary, transform=ax.transAxes, fontsize=10,
-            verticalalignment="center", fontfamily="monospace",
-            bbox=dict(boxstyle="round,pad=0.5", fc="white", alpha=0.9))
-    ax.set_title("Calorie Adherence Calendar (Last 6 Months)", fontsize=14,
-                 fontweight="bold")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

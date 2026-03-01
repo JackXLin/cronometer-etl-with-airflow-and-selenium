@@ -5,6 +5,10 @@ Contains data preparation, metric computation, and BMI category logic
 used across multiple PDF pages.
 """
 
+from datetime import timedelta
+
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -113,6 +117,103 @@ def compute_nutrient_correlations(processed: pd.DataFrame,
     return results
 
 
+def compute_lagged_correlations(processed: pd.DataFrame,
+                                nutrients: list,
+                                max_lag: int = 3) -> pd.DataFrame:
+    """
+    Compute Pearson correlations between each nutrient and weight change
+    at multiple lag offsets (0 to max_lag days).
+
+    A lag of N means: "does nutrient intake on day T correlate with
+    weight change on day T+N?"
+
+    Args:
+        processed (pd.DataFrame): Data with nutrient columns and
+            'Daily Weight change (kg)'.
+        nutrients (list): Column names of nutrients to test.
+        max_lag (int): Maximum lag in days (inclusive).
+
+    Returns:
+        pd.DataFrame: Index = nutrient names, columns = 'lag_0' .. 'lag_N'.
+            Each cell is a dict with keys: r, p, significant.
+    """
+    wt_change = processed["Daily Weight change (kg)"]
+    results = {}
+
+    for nutrient in nutrients:
+        row = {}
+        for lag in range(max_lag + 1):
+            # Reason: shift nutrient forward by `lag` so that nutrient[T]
+            # aligns with weight_change[T+lag].
+            shifted_nutrient = processed[nutrient].shift(lag)
+            valid = ~(shifted_nutrient.isna() | wt_change.isna())
+            if valid.sum() > 10:
+                r, p = stats.pearsonr(
+                    shifted_nutrient[valid], wt_change[valid],
+                )
+                row[f"lag_{lag}"] = {
+                    "r": r, "p": p, "significant": p < 0.05,
+                }
+            else:
+                row[f"lag_{lag}"] = {
+                    "r": np.nan, "p": np.nan, "significant": False,
+                }
+        results[nutrient] = row
+
+    return pd.DataFrame(results).T
+
+
+def compute_correlation_ci(processed: pd.DataFrame,
+                           nutrients: list,
+                           confidence: float = 0.95) -> list:
+    """
+    Compute Pearson correlations with confidence intervals using
+    Fisher z-transformation.
+
+    Args:
+        processed (pd.DataFrame): Data with nutrient columns and
+            'Daily Weight change (kg)'.
+        nutrients (list): Column names of nutrients to test.
+        confidence (float): Confidence level (default 0.95).
+
+    Returns:
+        list[dict]: Sorted by absolute correlation descending. Each dict
+            has keys: nutrient, correlation, p_value, significant,
+            ci_low, ci_high, n.
+    """
+    wt_change = processed["Daily Weight change (kg)"]
+    z_crit = stats.norm.ppf((1 + confidence) / 2)
+    results = []
+
+    for nutrient in nutrients:
+        valid = ~(processed[nutrient].isna() | wt_change.isna())
+        n = valid.sum()
+        if n > 10:
+            r, p = stats.pearsonr(
+                processed[nutrient][valid], wt_change[valid],
+            )
+            # Reason: Fisher z-transform converts r to approximately
+            # normal distribution for CI computation.
+            z = np.arctanh(r)
+            se = 1.0 / np.sqrt(n - 3)
+            z_low = z - z_crit * se
+            z_high = z + z_crit * se
+            ci_low = np.tanh(z_low)
+            ci_high = np.tanh(z_high)
+            results.append({
+                "nutrient": nutrient,
+                "correlation": r,
+                "p_value": p,
+                "significant": p < 0.05,
+                "ci_low": ci_low,
+                "ci_high": ci_high,
+                "n": n,
+            })
+
+    results.sort(key=lambda x: abs(x["correlation"]), reverse=True)
+    return results
+
+
 def build_key_figures_table(processed: pd.DataFrame,
                             tdee_estimates: dict,
                             target_calories: int,
@@ -203,3 +304,139 @@ def _fmt(val, decimals: int = 1, sign: bool = False) -> str:
         return "--"
     fmt = f"{{:+.{decimals}f}}" if sign else f"{{:.{decimals}f}}"
     return fmt.format(val)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Drawing helpers (sub-panel renderers used by page functions)
+# ─────────────────────────────────────────────────────────────────────────────
+def draw_weekly_waterfall(ax, processed):
+    """
+    Draw a weekly weight change waterfall chart with cumulative progress line.
+
+    Each bar represents one week's net weight change (green = loss, red = gain).
+    A secondary axis shows the cumulative weight change from the start.
+
+    Args:
+        ax: Matplotlib axis.
+        processed (pd.DataFrame): Must contain Date and Weight (kg) columns.
+    """
+    wt = processed[["Date", "Weight (kg)"]].dropna(subset=["Weight (kg)"]).copy()
+    wt["Week"] = wt["Date"].dt.to_period("W")
+
+    weekly = wt.groupby("Week").agg(
+        first_wt=("Weight (kg)", "first"),
+        last_wt=("Weight (kg)", "last"),
+    )
+    weekly["change"] = weekly["last_wt"] - weekly["first_wt"]
+    weekly["cumulative"] = weekly["change"].cumsum()
+
+    # Limit to last 16 weeks to keep chart readable
+    weekly = weekly.tail(16)
+
+    if len(weekly) == 0:
+        ax.text(0.5, 0.5, "Insufficient data", transform=ax.transAxes,
+                ha="center", va="center", fontsize=12)
+        ax.set_title("Weekly Weight Change", fontsize=12, fontweight="bold")
+        return
+
+    x = np.arange(len(weekly))
+    colors = ["#2ecc71" if c <= 0 else "#e74c3c" for c in weekly["change"]]
+    ax.bar(x, weekly["change"], color=colors, alpha=0.75, edgecolor="gray",
+           linewidth=0.5)
+    ax.axhline(y=0, color="black", linestyle="-", linewidth=0.8)
+
+    # Cumulative line on secondary axis
+    ax2 = ax.twinx()
+    ax2.plot(x, weekly["cumulative"].values, "o-", color="#3498db",
+             linewidth=2, markersize=4, label="Cumulative")
+    ax2.set_ylabel("Cumulative (kg)", color="#3498db", fontsize=9)
+    ax2.tick_params(axis="y", labelcolor="#3498db")
+
+    # Labels
+    week_labels = [str(w)[-5:] for w in weekly.index]
+    ax.set_xticks(x)
+    ax.set_xticklabels(week_labels, rotation=60, ha="right", fontsize=7)
+    ax.set_ylabel("Weekly Change (kg)")
+    ax.set_title("Weekly Weight Change Waterfall", fontsize=12,
+                 fontweight="bold")
+    ax.grid(True, alpha=0.3, axis="y")
+
+
+def draw_adherence_calendar(ax, processed):
+    """
+    Draw a GitHub-style calorie adherence calendar heatmap on the given axis.
+
+    Args:
+        ax: Matplotlib axis.
+        processed (pd.DataFrame): Must contain Date, On_track_calories,
+            Calorie_deficit columns.
+    """
+    cal = processed[["Date", "On_track_calories", "Calorie_deficit"]].copy()
+    cal["Weekday"] = cal["Date"].dt.weekday
+
+    def status(row):
+        """Map adherence to 0/0.5/1 for colouring."""
+        if row["On_track_calories"]:
+            return 1.0
+        return 0.5 if row["Calorie_deficit"] > 0 else 0.0
+
+    cal["Status"] = cal.apply(status, axis=1)
+
+    six_m = cal["Date"].max() - timedelta(days=180)
+    recent = cal[cal["Date"] >= six_m].copy()
+
+    if len(recent) == 0:
+        ax.text(0.5, 0.5, "Insufficient data", transform=ax.transAxes,
+                ha="center", va="center", fontsize=14)
+        ax.set_title("Calorie Adherence Calendar", fontsize=14,
+                     fontweight="bold")
+        return
+
+    recent["YearWeek"] = recent["Date"].dt.strftime("%Y-W%V")
+    weeks = sorted(recent["YearWeek"].unique())
+    matrix = np.full((7, len(weeks)), np.nan)
+
+    for _, row in recent.iterrows():
+        wi = weeks.index(row["YearWeek"])
+        matrix[row["Weekday"], wi] = row["Status"]
+
+    cmap = LinearSegmentedColormap.from_list(
+        "adh", ["#e74c3c", "#f39c12", "#2ecc71"], N=256,
+    )
+    im = ax.imshow(matrix, cmap=cmap, aspect="auto", vmin=0, vmax=1)
+    ax.set_yticks(range(7))
+    ax.set_yticklabels(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
+
+    # Month tick labels
+    positions, labels = [], []
+    cur_month = None
+    for i, wk in enumerate(weeks):
+        dates = recent[recent["YearWeek"] == wk]["Date"]
+        if len(dates) > 0:
+            m = dates.iloc[0].strftime("%b %Y")
+            if m != cur_month:
+                positions.append(i)
+                labels.append(m)
+                cur_month = m
+    ax.set_xticks(positions)
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+
+    cbar = plt.colorbar(im, ax=ax, shrink=0.5, aspect=20)
+    cbar.set_ticks([0, 0.5, 1])
+    cbar.set_ticklabels(["Over Target", "Under Target", "On Track"])
+
+    total = len(recent)
+    on = (recent["Status"] == 1.0).sum()
+    under = (recent["Status"] == 0.5).sum()
+    over = (recent["Status"] == 0.0).sum()
+    summary = (
+        f"Last 6 Months:\n"
+        f"On Track: {on} days ({on / total * 100:.1f}%)\n"
+        f"Under:    {under} days ({under / total * 100:.1f}%)\n"
+        f"Over:     {over} days ({over / total * 100:.1f}%)"
+    )
+    ax.text(1.15, 0.5, summary, transform=ax.transAxes, fontsize=10,
+            verticalalignment="center", fontfamily="monospace",
+            bbox=dict(boxstyle="round,pad=0.5", fc="white", alpha=0.9))
+    ax.set_title("Calorie Adherence Calendar (Last 6 Months)", fontsize=14,
+                 fontweight="bold")

@@ -89,7 +89,7 @@ def page_weight_prediction(pdf, processed, target_weight_kg,
     ax_top.legend(fontsize=9)
     ax_top.grid(True, alpha=0.3)
 
-    # --- Bottom panel: calorie-aware projection ---
+    # --- Bottom panel: calorie-aware multi-scenario projection ---
     proj_days = 90
     recent = processed.tail(30)
     if "Weight_smoothed" in recent.columns:
@@ -120,15 +120,38 @@ def page_weight_prediction(pdf, processed, target_weight_kg,
         ax_bot.fill_between(future, lower, upper, color="blue", alpha=0.1,
                             label="95% CI")
 
-        # Scenario 2: TDEE-based (if eating at target calories)
+        # Multi-scenario TDEE-based projections
         est_tdee = tdee_estimates.get("weighted_average")
+        scenario_table_rows = []
+        kg_to_target = last_weight - target_weight_kg
+
         if est_tdee:
-            deficit_per_day = target_calories_from_env() - est_tdee
-            # Reason: predicted weight delta = caloric surplus / KCAL_PER_KG
-            daily_kg_change = deficit_per_day / KCAL_PER_KG
-            tdee_proj = last_weight + daily_kg_change * np.arange(1, proj_days + 1)
-            ax_bot.plot(future, tdee_proj, "--", color="orange", linewidth=2,
-                        label=f"At target cal ({int(target_calories_from_env())})")
+            avg_intake = recent["Energy (kcal)"].mean()
+            # Reason: each scenario represents a different daily calorie
+            # intake level; the resulting weight trajectory depends on
+            # the caloric surplus/deficit relative to TDEE.
+            scenarios = [
+                ("Aggressive (TDEE−750)", est_tdee - 750, "#e74c3c", "-"),
+                ("Standard (TDEE−500)", est_tdee - 500, "#e67e22", "--"),
+                ("Slow (TDEE−250)", est_tdee - 250, "#f1c40f", "-."),
+                (f"Current avg ({avg_intake:.0f})", avg_intake, "#2ecc71", ":"),
+            ]
+
+            for label, cal_level, color, ls in scenarios:
+                deficit = cal_level - est_tdee
+                daily_kg = deficit / KCAL_PER_KG
+                proj = last_weight + daily_kg * np.arange(1, proj_days + 1)
+                ax_bot.plot(future, proj, ls, color=color, linewidth=2,
+                            label=label)
+
+                # Days to target calculation
+                if abs(daily_kg) > 1e-5 and kg_to_target * daily_kg < 0:
+                    dtg = abs(kg_to_target / daily_kg)
+                    scenario_table_rows.append([label, f"{cal_level:.0f}",
+                                                f"{dtg:.0f}"])
+                else:
+                    scenario_table_rows.append([label, f"{cal_level:.0f}",
+                                                "N/A"])
 
         ax_bot.axhline(y=target_weight_kg, color="purple", linestyle=":",
                        linewidth=2, label="Target Weight")
@@ -138,8 +161,27 @@ def page_weight_prediction(pdf, processed, target_weight_kg,
         ax_bot.set_xlabel("Days from start of recent window")
         ax_bot.set_ylabel("Weight (kg)")
         ax_bot.set_ylim(100, 140)
-        ax_bot.legend(fontsize=9)
+        ax_bot.legend(fontsize=8, loc="upper right")
         ax_bot.grid(True, alpha=0.3)
+
+        # Inset table: days to target per scenario
+        if scenario_table_rows:
+            inset_tbl = ax_bot.table(
+                cellText=scenario_table_rows,
+                colLabels=["Scenario", "kcal/day", "Days to Target"],
+                cellLoc="center",
+                loc="lower left",
+                bbox=[0.02, 0.02, 0.45, 0.28],
+            )
+            inset_tbl.auto_set_font_size(False)
+            inset_tbl.set_fontsize(8)
+            for key, cell in inset_tbl.get_celld().items():
+                cell.set_alpha(0.85)
+                if key[0] == 0:
+                    cell.set_facecolor("#d5e8d4")
+                    cell.set_fontsize(8)
+                else:
+                    cell.set_facecolor("white")
 
     plt.tight_layout()
     pdf.savefig(fig)
@@ -149,7 +191,8 @@ def page_weight_prediction(pdf, processed, target_weight_kg,
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE 2 — TDEE Dashboard
 # ─────────────────────────────────────────────────────────────────────────────
-def page_tdee_dashboard(pdf, processed, tdee_estimates, target_calories):
+def page_tdee_dashboard(pdf, processed, tdee_estimates, target_calories,
+                        target_weight_kg=70):
     """
     Four-panel TDEE dashboard:
         Top-left:  TDEE method comparison bars.
@@ -162,6 +205,7 @@ def page_tdee_dashboard(pdf, processed, tdee_estimates, target_calories):
         processed (pd.DataFrame): Data with TDEE columns.
         tdee_estimates (dict): TDEE results.
         target_calories (int): Daily calorie target.
+        target_weight_kg (float): Goal weight for colour logic.
     """
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
 
@@ -240,7 +284,15 @@ def page_tdee_dashboard(pdf, processed, tdee_estimates, target_calories):
             ax3.text(bi.get_x() + bi.get_width() / 2, bi.get_height() + 20,
                      f"{vi:.0f}", ha="center", va="bottom", fontsize=10,
                      fontweight="bold")
-        sc = "green" if surplus > 0 else "red"
+        # Reason: colour depends on whether surplus/deficit moves weight
+        # toward or away from the goal.
+        current_weight = processed["Weight (kg)"].dropna().iloc[-1]
+        wants_loss = current_weight > target_weight_kg
+        # Deficit is good when trying to lose; surplus is good when gaining.
+        goal_aligned = (surplus < 0 and wants_loss) or (
+            surplus > 0 and not wants_loss
+        )
+        sc = "green" if goal_aligned else "red"
         ax3.text(0.5, max(bar_vals) * 0.5,
                  f'{"Surplus" if surplus > 0 else "Deficit"}:\n{abs(surplus):.0f} cal/day',
                  ha="center", va="center", fontsize=12, fontweight="bold",

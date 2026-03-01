@@ -21,6 +21,8 @@ from visualisation_helpers import (
     get_bmi_category,
     prepare_metrics,
     compute_nutrient_correlations,
+    compute_lagged_correlations,
+    compute_correlation_ci,
     build_key_figures_table,
     _fmt,
 )
@@ -223,3 +225,118 @@ class TestFmt:
     def test_zero_decimals(self):
         """Zero decimals should round to integer representation."""
         assert _fmt(2500.7, 0) == "2501"
+
+
+# ---------------------------------------------------------------------------
+# compute_lagged_correlations
+# ---------------------------------------------------------------------------
+class TestComputeLaggedCorrelations:
+    """Tests for the lagged nutrient-weight correlation calculator."""
+
+    def test_returns_dataframe_with_lag_columns(self, sample_df):
+        """Result should be a DataFrame with lag_0 .. lag_3 columns."""
+        nutrients = ["Energy (kcal)", "Protein (g)"]
+        result = compute_lagged_correlations(sample_df, nutrients, max_lag=3)
+        assert isinstance(result, pd.DataFrame)
+        for i in range(4):
+            assert f"lag_{i}" in result.columns
+
+    def test_index_matches_nutrients(self, sample_df):
+        """Row index should match the provided nutrient list."""
+        nutrients = ["Energy (kcal)", "Fat (g)"]
+        result = compute_lagged_correlations(sample_df, nutrients, max_lag=2)
+        for n in nutrients:
+            assert n in result.index
+
+    def test_cells_are_dicts_with_required_keys(self, sample_df):
+        """Each cell should be a dict with r, p, significant keys."""
+        nutrients = ["Energy (kcal)"]
+        result = compute_lagged_correlations(sample_df, nutrients, max_lag=1)
+        cell = result.loc["Energy (kcal)", "lag_0"]
+        assert isinstance(cell, dict)
+        assert "r" in cell
+        assert "p" in cell
+        assert "significant" in cell
+
+    def test_r_values_in_valid_range(self, sample_df):
+        """Pearson r values should be between -1 and 1."""
+        nutrients = ["Energy (kcal)", "Protein (g)"]
+        result = compute_lagged_correlations(sample_df, nutrients, max_lag=3)
+        for nutrient in nutrients:
+            for col in result.columns:
+                cell = result.loc[nutrient, col]
+                if not np.isnan(cell["r"]):
+                    assert -1.0 <= cell["r"] <= 1.0
+
+    def test_insufficient_data_returns_nan(self):
+        """With too few rows, r should be NaN."""
+        df = pd.DataFrame({
+            "Energy (kcal)": [2000.0] * 5,
+            "Daily Weight change (kg)": [0.1] * 5,
+        })
+        result = compute_lagged_correlations(df, ["Energy (kcal)"], max_lag=1)
+        cell = result.loc["Energy (kcal)", "lag_0"]
+        assert np.isnan(cell["r"])
+
+    def test_max_lag_zero(self, sample_df):
+        """max_lag=0 should produce only lag_0."""
+        nutrients = ["Protein (g)"]
+        result = compute_lagged_correlations(sample_df, nutrients, max_lag=0)
+        assert list(result.columns) == ["lag_0"]
+
+
+# ---------------------------------------------------------------------------
+# compute_correlation_ci
+# ---------------------------------------------------------------------------
+class TestComputeCorrelationCI:
+    """Tests for correlation with confidence interval computation."""
+
+    def test_returns_list_of_dicts(self, sample_df):
+        """Each item should have the expected keys including CI bounds."""
+        nutrients = ["Energy (kcal)", "Protein (g)"]
+        result = compute_correlation_ci(sample_df, nutrients)
+        assert isinstance(result, list)
+        for item in result:
+            for key in ["nutrient", "correlation", "p_value", "significant",
+                        "ci_low", "ci_high", "n"]:
+                assert key in item
+
+    def test_ci_brackets_correlation(self, sample_df):
+        """ci_low should be <= correlation <= ci_high."""
+        nutrients = ["Energy (kcal)", "Protein (g)"]
+        result = compute_correlation_ci(sample_df, nutrients)
+        for item in result:
+            assert item["ci_low"] <= item["correlation"] <= item["ci_high"]
+
+    def test_sorted_by_abs_correlation(self, sample_df):
+        """Results should be sorted by absolute correlation descending."""
+        nutrients = ["Energy (kcal)", "Protein (g)", "Carbs (g)"]
+        result = compute_correlation_ci(sample_df, nutrients)
+        abs_corrs = [abs(r["correlation"]) for r in result]
+        assert abs_corrs == sorted(abs_corrs, reverse=True)
+
+    def test_n_equals_valid_rows(self, sample_df):
+        """Sample size n should match the number of non-NaN rows."""
+        nutrients = ["Energy (kcal)"]
+        result = compute_correlation_ci(sample_df, nutrients)
+        valid = ~(sample_df["Energy (kcal)"].isna()
+                  | sample_df["Daily Weight change (kg)"].isna())
+        assert result[0]["n"] == valid.sum()
+
+    def test_insufficient_data_returns_empty(self):
+        """Should return empty list when fewer than 11 valid rows."""
+        df = pd.DataFrame({
+            "Energy (kcal)": [2000.0] * 8,
+            "Daily Weight change (kg)": [0.1] * 8,
+        })
+        result = compute_correlation_ci(df, ["Energy (kcal)"])
+        assert result == []
+
+    def test_higher_confidence_widens_ci(self, sample_df):
+        """99% CI should be wider than 95% CI."""
+        nutrients = ["Energy (kcal)"]
+        ci_95 = compute_correlation_ci(sample_df, nutrients, confidence=0.95)
+        ci_99 = compute_correlation_ci(sample_df, nutrients, confidence=0.99)
+        width_95 = ci_95[0]["ci_high"] - ci_95[0]["ci_low"]
+        width_99 = ci_99[0]["ci_high"] - ci_99[0]["ci_low"]
+        assert width_99 > width_95
