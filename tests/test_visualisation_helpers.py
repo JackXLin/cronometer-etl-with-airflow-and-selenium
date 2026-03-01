@@ -139,6 +139,12 @@ class TestPrepareMetrics:
         result = prepare_metrics(sample_df, 175.0, 70.0, 2000, 0.1)
         assert result is sample_df
 
+    def test_adds_protein_per_kg(self, sample_df):
+        """prepare_metrics should add a Protein_per_kg column."""
+        result = prepare_metrics(sample_df, 175.0, 70.0, 2000, 0.1)
+        assert "Protein_per_kg" in result.columns
+        assert result["Protein_per_kg"].notna().any()
+
 
 # ---------------------------------------------------------------------------
 # compute_nutrient_correlations
@@ -196,11 +202,17 @@ class TestBuildKeyFiguresTable:
         assert "All Time" in result.columns
 
     def test_contains_key_metric_rows(self, sample_df):
-        """Table index should contain TDEE, intake, adherence rows."""
+        """Table index should contain intake, adherence, and new rows."""
         prepare_metrics(sample_df, 175.0, 70.0, 2000, 0.1)
         result = build_key_figures_table(sample_df, {}, 2000, 100, 25)
         assert "Avg Intake (kcal)" in result.index
         assert "Cal Adherence (%)" in result.index
+        assert "Actual Trend (kg/wk)" in result.index
+        assert "Expected from Intake (kg/wk)" in result.index
+        assert "Trend Discrepancy (kg/wk)" in result.index
+        assert "Avg Weight (kg)" in result.index
+        assert "Wknd-Wkday Diff (kcal)" in result.index
+        assert "Intake Consistency (CV%)" in result.index
 
 
 # ---------------------------------------------------------------------------

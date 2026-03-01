@@ -1,8 +1,8 @@
 """
 Shared helper utilities for the visualisation module.
 
-Contains data preparation, metric computation, and BMI category logic
-used across multiple PDF pages.
+Contains data preparation, metric computation, BMI category logic,
+and drawing helpers used across multiple PDF pages.
 """
 
 from datetime import timedelta
@@ -77,6 +77,10 @@ def prepare_metrics(processed: pd.DataFrame, height_cm: float,
     low = target_calories * (1 - calorie_tolerance_pct)
     high = target_calories * (1 + calorie_tolerance_pct)
     processed["On_track_calories"] = energy.between(low, high)
+
+    # Protein per kg of body weight (key fat-loss metric)
+    safe_weight = processed["Weight (kg)"].replace(0, np.nan)
+    processed["Protein_per_kg"] = processed["Protein (g)"] / safe_weight
 
     # Temporal features
     processed["Month"] = processed["Date"].dt.month
@@ -246,14 +250,18 @@ def build_key_figures_table(processed: pd.DataFrame,
         valid = data.dropna(subset=["Energy (kcal)"])
         avg_intake = valid["Energy (kcal)"].mean() if len(valid) > 0 else np.nan
 
-        # TDEE from adaptive column if available
+        # Reason: All Time TDEE average conflates different activity levels
+        # over months/years, so we show N/A instead of a misleading mean.
         tdee_val = np.nan
-        if "TDEE_adaptive" in data.columns:
+        if label != "All Time" and "TDEE_adaptive" in data.columns:
             tdee_col = data["TDEE_adaptive"].dropna()
             if len(tdee_col) > 0:
-                tdee_val = tdee_col.iloc[-1] if label != "All Time" else tdee_col.mean()
+                tdee_val = tdee_col.iloc[-1]
 
         surplus_deficit = avg_intake - tdee_val if not np.isnan(tdee_val) else np.nan
+
+        # Average weight for context
+        avg_weight = data["Weight (kg)"].mean() if len(data) > 0 else np.nan
 
         # Smoothed weight trend (kg/week)
         if "Weight_smoothed" in data.columns and len(data) > 1:
@@ -266,22 +274,43 @@ def build_key_figures_table(processed: pd.DataFrame,
         else:
             trend_per_week = np.nan
 
-        # Predicted weekly delta from intake vs TDEE
+        # Expected weekly delta from intake vs TDEE
         predicted_weekly = surplus_deficit / 7000 * 7 if not np.isnan(surplus_deficit) else np.nan
+
+        # Discrepancy: actual trend vs predicted from energy balance
+        if (not np.isnan(trend_per_week) and not np.isnan(predicted_weekly)):
+            discrepancy = trend_per_week - predicted_weekly
+        else:
+            discrepancy = np.nan
 
         protein_avg = valid["Protein (g)"].mean() if len(valid) > 0 else np.nan
         fiber_avg = valid["Fiber (g)"].mean() if len(valid) > 0 else np.nan
         adherence = data["On_track_calories"].mean() * 100 if "On_track_calories" in data.columns else np.nan
 
+        # Weekend vs weekday intake difference
+        if "Is_weekend" in data.columns:
+            wd = data[~data["Is_weekend"]]["Energy (kcal)"].mean()
+            we = data[data["Is_weekend"]]["Energy (kcal)"].mean()
+            wk_diff = we - wd if not (np.isnan(we) or np.isnan(wd)) else np.nan
+        else:
+            wk_diff = np.nan
+
+        # Intake consistency (coefficient of variation)
+        intake_cv = compute_intake_consistency(valid["Energy (kcal)"])
+
         rows.append({
             "Time Window": label,
+            "Avg Weight (kg)": _fmt(avg_weight, 1),
             "Avg Intake (kcal)": _fmt(avg_intake, 0),
-            "Est. TDEE (kcal)": _fmt(tdee_val, 0),
-            "Surplus/Deficit (kcal)": _fmt(surplus_deficit, 0, sign=True),
-            "Weight Trend (kg/wk)": _fmt(trend_per_week, 2, sign=True),
-            "Predicted Wt Delta (kg/wk)": _fmt(predicted_weekly, 2, sign=True),
+            "Est. TDEE vs Intake (kcal)": _fmt(tdee_val, 0),
+            "Surplus/Deficit vs TDEE (kcal)": _fmt(surplus_deficit, 0, sign=True),
+            "Actual Trend (kg/wk)": _fmt(trend_per_week, 2, sign=True),
+            "Expected from Intake (kg/wk)": _fmt(predicted_weekly, 2, sign=True),
+            "Trend Discrepancy (kg/wk)": _fmt(discrepancy, 2, sign=True),
             "Protein (g/day)": _fmt(protein_avg, 0),
             "Fiber (g/day)": _fmt(fiber_avg, 0),
+            "Wknd-Wkday Diff (kcal)": _fmt(wk_diff, 0, sign=True),
+            "Intake Consistency (CV%)": _fmt(intake_cv, 1),
             "Cal Adherence (%)": _fmt(adherence, 1),
         })
 
@@ -435,8 +464,14 @@ def draw_adherence_calendar(ax, processed):
         f"Under:    {under} days ({under / total * 100:.1f}%)\n"
         f"Over:     {over} days ({over / total * 100:.1f}%)"
     )
-    ax.text(1.15, 0.5, summary, transform=ax.transAxes, fontsize=10,
-            verticalalignment="center", fontfamily="monospace",
+    ax.text(1.15, -0.05, summary, transform=ax.transAxes, fontsize=10,
+            verticalalignment="top", fontfamily="monospace",
             bbox=dict(boxstyle="round,pad=0.5", fc="white", alpha=0.9))
     ax.set_title("Calorie Adherence Calendar (Last 6 Months)", fontsize=14,
                  fontweight="bold")
+
+
+# Reason: Phase 3 helpers live in visualisation_helpers_v2.py to stay
+# under the 500-line module limit.  Re-export compute_intake_consistency
+# here because build_key_figures_table (above) calls it directly.
+from visualisation_helpers_v2 import compute_intake_consistency  # noqa: E402, F401
