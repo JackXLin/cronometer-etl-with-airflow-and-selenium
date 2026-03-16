@@ -1,54 +1,134 @@
+import os
+from typing import Optional
+
 import pandas as pd
 
-def process_csv(file_path1, file_path2):
-    # Load the CSV files
-    # file_path1: Path to the first CSV file (nutrition data)
-    # file_path2: Path to the second CSV file (bio data)
-    nutrition = pd.read_csv(file_path1)
-    bio = pd.read_csv(file_path2)
 
-    # Perform data cleaning and processing on the 'bio' DataFrame
-    # Rename columns for consistency and clarity
-    bio.rename(columns={"Day":"Date"}, inplace=True)
-    bio.rename(columns={"Amount":"Weight (kg)"}, inplace=True)
-    
-    # Filter rows where the 'Unit' column is 'kg'
-    bio_cleaned = bio[bio["Unit"]=="kg"]
-    
-    # Convert 'Date' column to datetime format for both DataFrames
-    bio_cleaned["Date"] = pd.to_datetime(bio_cleaned["Date"])
+PROCESSED_OUTPUT_PATH = "/opt/airflow/csvs/processed_data.csv"
+
+
+def _load_nutrition_data(file_path: str) -> pd.DataFrame:
+    """
+    Load and prepare the Cronometer nutrition export.
+
+    Args:
+        file_path (str): Path to the Cronometer daily nutrition CSV.
+
+    Returns:
+        pd.DataFrame: Cleaned nutrition data.
+    """
+    nutrition = pd.read_csv(file_path)
     nutrition["Date"] = pd.to_datetime(nutrition["Date"])
-    
-    # Drop the 'Completed' column from the 'nutrition' DataFrame as it's not needed
-    nutrition = nutrition.drop(columns=["Completed"])
-    
-    # Drop the 'Unit' and 'Metric' columns from the cleaned 'bio' DataFrame as they're not needed
-    bio_cleaned = bio_cleaned.drop(columns=["Unit", "Metric"])
-    
-    # Merge the 'nutrition' and cleaned 'bio' DataFrames on the 'Date' column
-    # Use a left join to retain all rows from the 'nutrition' DataFrame
-    processed = pd.merge(nutrition, bio_cleaned, how="left")
+    return nutrition.drop(columns=["Completed"], errors="ignore")
 
-    # Fill Weight (kg) with previous value since 0 will disrupt the analysis
+
+def _load_biometric_data(file_path: str) -> pd.DataFrame:
+    """
+    Load and prepare the Cronometer biometrics export.
+
+    Args:
+        file_path (str): Path to the Cronometer biometrics CSV.
+
+    Returns:
+        pd.DataFrame: Weight-only biometrics data keyed by Date.
+    """
+    bio = pd.read_csv(file_path)
+    bio = bio.rename(columns={"Day": "Date", "Amount": "Weight (kg)"})
+    bio_cleaned = bio[bio["Unit"] == "kg"].copy()
+    bio_cleaned["Date"] = pd.to_datetime(bio_cleaned["Date"])
+    return bio_cleaned.drop(columns=["Unit", "Metric"], errors="ignore")
+
+
+def _load_garmin_data(file_path: Optional[str]) -> Optional[pd.DataFrame]:
+    """
+    Load optional Garmin daily data for merging.
+
+    Args:
+        file_path (Optional[str]): Path to the Garmin daily CSV, if available.
+
+    Returns:
+        Optional[pd.DataFrame]: Garmin data keyed by Date, or None.
+
+    Raises:
+        FileNotFoundError: If a Garmin path is provided but does not exist.
+        ValueError: If the Garmin CSV does not include a Date column.
+    """
+    if not file_path:
+        return None
+
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Garmin CSV not found at `{file_path}`.")
+
+    garmin = pd.read_csv(file_path)
+    if "Date" not in garmin.columns:
+        raise ValueError("Garmin CSV must include a `Date` column.")
+
+    garmin_columns = [
+        column_name
+        for column_name in garmin.columns
+        if column_name == "Date" or column_name.startswith("garmin_")
+    ]
+    garmin = garmin[garmin_columns].copy()
+    garmin["Date"] = pd.to_datetime(garmin["Date"])
+    return garmin
+
+
+def _fill_non_garmin_values(processed: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fill missing non-Garmin values while preserving Garmin NaNs.
+
+    Args:
+        processed (pd.DataFrame): Merged processed dataset.
+
+    Returns:
+        pd.DataFrame: Processed dataset with Garmin NaNs preserved.
+    """
+    garmin_columns = [
+        column_name
+        for column_name in processed.columns
+        if column_name.startswith("garmin_")
+    ]
+    fill_columns = [
+        column_name
+        for column_name in processed.columns
+        if column_name != "Date" and column_name not in garmin_columns
+    ]
+    processed[fill_columns] = processed[fill_columns].fillna(0)
+    return processed
+
+
+def process_csv(
+    file_path1: str,
+    file_path2: str,
+    garmin_file_path: Optional[str] = None,
+) -> str:
+    """
+    Merge Cronometer nutrition, Cronometer biometrics, and optional Garmin data.
+
+    Args:
+        file_path1 (str): Path to the Cronometer nutrition CSV.
+        file_path2 (str): Path to the Cronometer biometrics CSV.
+        garmin_file_path (Optional[str]): Path to the Garmin daily CSV.
+
+    Returns:
+        str: Path to the saved processed CSV.
+    """
+    nutrition = _load_nutrition_data(file_path1)
+    bio_cleaned = _load_biometric_data(file_path2)
+    processed = pd.merge(nutrition, bio_cleaned, how="left", on="Date")
+
+    garmin_data = _load_garmin_data(garmin_file_path)
+    if garmin_data is not None:
+        processed = pd.merge(processed, garmin_data, how="left", on="Date")
+
+    processed = processed.sort_values("Date").reset_index(drop=True)
     processed["Weight (kg)"] = processed["Weight (kg)"].bfill()
-    
-    # Fill any missing values with 0
-    processed = processed.fillna(0)
-
-    # Create new columns for rolling Calorie average 7 days and 30 days
+    processed = _fill_non_garmin_values(processed)
     processed["Energy 7 days avg (kcal)"] = processed["Energy (kcal)"].rolling(7).mean()
     processed["Energy 30 days avg (kcal)"] = processed["Energy (kcal)"].rolling(30).mean()
-
-    # Create a new column for daily weight change
-    processed["Daily Weight change (kg)"] = processed["Weight (kg)"] - processed["Weight (kg)"].shift(1)
-
-    # Shifted the new column to reflect the weight change was due to previous day rather the next day
-    # since the weight measurement was taken every morning
+    processed["Daily Weight change (kg)"] = (
+        processed["Weight (kg)"] - processed["Weight (kg)"].shift(1)
+    )
     processed["Daily Weight change (kg)"] = processed["Daily Weight change (kg)"].shift(-1)
-        
-    # Save the cleaned and merged data to a new CSV file
-    file_path = "/opt/airflow/csvs/processed_data.csv"
-    processed.to_csv(path_or_buf=file_path, index=False)
-
-    # Return the path to the saved CSV file
-    return file_path
+    processed.to_csv(path_or_buf=PROCESSED_OUTPUT_PATH, index=False)
+    return PROCESSED_OUTPUT_PATH

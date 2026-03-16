@@ -1,7 +1,7 @@
 
 # Cronometer ETL Pipeline with Apache Airflow and Selenium
 
-This project sets up an automated ETL (Extract, Transform, Load) pipeline using Apache Airflow and Selenium. The pipeline logs into Cronometer, exports daily nutrition data, processes the data, visualises it, and uploads the visualisation to Amazon S3.
+This project sets up an automated ETL (Extract, Transform, Load) pipeline using Apache Airflow and Selenium. The pipeline logs into Cronometer, exports daily nutrition data, optionally fetches Garmin Connect daily metrics, processes the data, visualises it, and uploads the visualisation to Amazon S3.
 
 ## Table of Contents
 
@@ -30,6 +30,7 @@ This project demonstrates setting up an automated data pipeline using Apache Air
 - Pandas
 - Matplotlib
 - dotenv (for environment variables)
+- Optional: Garmin Connect account for wearable metrics
 
 ## Setup
 
@@ -52,6 +53,16 @@ environment:
   AWS_DEFAULT_REGION: your-region
 ```
 
+### Optional Garmin Connect Integration
+
+If you want to enrich the processed dataset with Garmin daily metrics such as steps, sleep, stress, body battery, activity counts, and intensity minutes:
+
+1. Copy `.env.example` to `.env`.
+2. Set `GARMIN_ENABLED=true`.
+3. Fill in `GARMIN_EMAIL` and `GARMIN_PASSWORD`.
+4. Leave `GARMINTOKENS` pointed at `/opt/airflow/config/garmin_tokens` unless you have a different mounted token location.
+5. Adjust `GARMIN_LOOKBACK_DAYS` if you want a different backfill window.
+
 ## Running the Docker Containers
 
 Build and run the Docker containers:
@@ -61,14 +72,39 @@ docker-compose build
 docker-compose up -d
 ```
 
+## Garmin Token Bootstrap
+
+Garmin ingestion uses a manual bootstrap token model:
+
+1. Start the Airflow environment so the Python dependencies are available.
+2. Open a shell in an Airflow container.
+3. Run the bootstrap entrypoint:
+
+```bash
+python /opt/airflow/dags/garmin_auth_bootstrap.py
+```
+
+4. Complete the Garmin login and MFA prompt once.
+5. Confirm that token files were written under `GARMINTOKENS` (default: `/opt/airflow/config/garmin_tokens`).
+
+example command:
+```bash
+docker compose run --rm airflow-cli python /opt/airflow/dags/garmin_auth_bootstrap.py
+```
+
+After that, scheduled DAG runs reuse the saved Garmin session non-interactively.
+
+When Garmin columns are present in the processed dataset, the PDF report also adds a Garmin context page with weekly activity summary, sleep and stress trends, body battery / resting-heart-rate context, and simple adherence insights.
+
 ## DAG Configuration
 
 Create a DAG to automate the entire process. The DAG should include tasks for:
 
 1. Fetching the CSV data from Cronometer.
-2. Processing the CSV data.
-3. Visualising the processed data.
-4. Uploading the visualisation to S3.
+2. Optionally fetching Garmin daily data when `GARMIN_ENABLED=true`.
+3. Processing the CSV data.
+4. Visualising the processed data.
+5. Uploading the visualisation to S3.
 
 ## Automating Cronometer Data Export
 

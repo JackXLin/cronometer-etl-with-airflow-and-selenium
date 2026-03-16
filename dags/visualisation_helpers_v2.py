@@ -79,8 +79,21 @@ def build_weekly_summary_table(processed: pd.DataFrame,
         pd.DataFrame: One row per week with intake, TDEE, deficit,
             weight start/end, delta, and adherence.
     """
-    wt = processed[["Date", "Weight (kg)", "Energy (kcal)",
-                     "On_track_calories"]].copy()
+    base_columns = ["Date", "Weight (kg)", "Energy (kcal)", "On_track_calories"]
+    optional_garmin_columns = [
+        "garmin_steps",
+        "garmin_sleep_seconds",
+        "garmin_avg_stress",
+        "garmin_intensity_moderate_min",
+        "garmin_intensity_vigorous_min",
+        "garmin_activity_count",
+    ]
+    selected_columns = base_columns + [
+        column_name
+        for column_name in optional_garmin_columns
+        if column_name in processed.columns
+    ]
+    wt = processed[selected_columns].copy()
     if "TDEE_adaptive" in processed.columns:
         wt["TDEE_adaptive"] = processed["TDEE_adaptive"]
     wt["Week"] = wt["Date"].dt.to_period("W")
@@ -99,7 +112,7 @@ def build_weekly_summary_table(processed: pd.DataFrame,
         delta = wt_end - wt_start
         adh = w["On_track_calories"].mean() * 100
 
-        rows.append({
+        row = {
             "Week": str(week)[-5:],
             "Avg Intake": _fmt(avg_intake, 0),
             "Avg TDEE": _fmt(avg_tdee, 0),
@@ -108,7 +121,27 @@ def build_weekly_summary_table(processed: pd.DataFrame,
             "Wt End": _fmt(wt_end, 1),
             "Wt Delta": _fmt(delta, 2, sign=True),
             "Adh %": _fmt(adh, 0),
-        })
+        }
+        if "garmin_steps" in w.columns:
+            row["Steps"] = _fmt(w["garmin_steps"].mean(), 0)
+        if "garmin_sleep_seconds" in w.columns:
+            row["Sleep h"] = _fmt(w["garmin_sleep_seconds"].mean() / 3600.0, 1)
+        if "garmin_avg_stress" in w.columns:
+            row["Stress"] = _fmt(w["garmin_avg_stress"].mean(), 0)
+        if (
+            "garmin_intensity_moderate_min" in w.columns
+            or "garmin_intensity_vigorous_min" in w.columns
+        ):
+            total_intensity = pd.Series(0.0, index=w.index)
+            if "garmin_intensity_moderate_min" in w.columns:
+                total_intensity = total_intensity + w["garmin_intensity_moderate_min"].fillna(0)
+            if "garmin_intensity_vigorous_min" in w.columns:
+                total_intensity = total_intensity + w["garmin_intensity_vigorous_min"].fillna(0)
+            row["Act Min"] = _fmt(total_intensity.sum(), 0)
+        if "garmin_activity_count" in w.columns:
+            row["Acts"] = _fmt(w["garmin_activity_count"].fillna(0).sum(), 0)
+
+        rows.append(row)
 
     return pd.DataFrame(rows)
 

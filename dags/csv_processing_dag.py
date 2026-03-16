@@ -4,11 +4,16 @@ from airflow.utils.trigger_rule import TriggerRule
 from datetime import timedelta, datetime
 from airflow.operators.empty import EmptyOperator
 import os
+from typing import Optional
 from dotenv import load_dotenv
 from process_csv import process_csv as process_csv_func
 from visualisation import visualise_data as visualise_data_func
 from upload_s3 import upload_to_s3 as upload_to_s3_func
 from fetch_cronometer import cronometer_export as cronometer_export_func
+from fetch_garmin import (
+    fetch_garmin_daily_data as fetch_garmin_daily_data_func,
+    is_garmin_enabled as is_garmin_enabled_func,
+)
 from remove_old_file import remove_old_files as remove_old_files_func
 
 default_args = {
@@ -34,8 +39,18 @@ def csv_processing_dag():
         cronometer_export_func()
 
     @task
-    def process_csv(file_path1: str, file_path2: str):
-        return process_csv_func(file_path1, file_path2)
+    def fetch_garmin_data() -> Optional[str]:
+        if not is_garmin_enabled_func():
+            return None
+        return fetch_garmin_daily_data_func()
+
+    @task
+    def process_csv(
+        file_path1: str,
+        file_path2: str,
+        file_path3: Optional[str],
+    ):
+        return process_csv_func(file_path1, file_path2, file_path3)
 
     @task
     def visualise_data(file_path: str):
@@ -53,7 +68,8 @@ def csv_processing_dag():
     # Task dependencies
     remove_task = remove_files()
     fetch_task = fetch_cronometer_data()
-    process_task = process_csv(file_path1, file_path2)
+    fetch_garmin_task = fetch_garmin_data()
+    process_task = process_csv(file_path1, file_path2, fetch_garmin_task)
     visualisation_task = visualise_data(process_task)
 
     # Toggle S3 upload via env flag (UPLOAD_TO_S3=true/false)
@@ -66,7 +82,7 @@ def csv_processing_dag():
         # No-op task to keep downstream chaining intact when upload is disabled
         upload_task = EmptyOperator(task_id='skip_upload_to_s3')
 
-    remove_task >> fetch_task >> process_task >> visualisation_task >> upload_task
+    remove_task >> fetch_task >> fetch_garmin_task >> process_task >> visualisation_task >> upload_task
 
     trigger = TriggerDagRunOperator(
         task_id="trigger_retry",
@@ -76,6 +92,13 @@ def csv_processing_dag():
         trigger_rule=TriggerRule.ONE_FAILED
     )
 
-    [remove_task >> fetch_task >> process_task >> visualisation_task >> upload_task] >> trigger
+    [
+        remove_task
+        >> fetch_task
+        >> fetch_garmin_task
+        >> process_task
+        >> visualisation_task
+        >> upload_task
+    ] >> trigger
 
 dag_instance = csv_processing_dag()

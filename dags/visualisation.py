@@ -17,11 +17,8 @@ from visualisation_helpers import (
     draw_weekly_waterfall,
     draw_adherence_calendar,
 )
-from visualisation_helpers_v2 import (
-    build_strongest_driver_callout,
-    compute_day_of_week_stats,
-    build_weekly_summary_table,
-)
+from visualisation_helpers_v2 import build_strongest_driver_callout
+from visualisation_garmin import has_garmin_report_data, page_garmin_context
 from visualisation_pages import (
     page_weight_prediction,
     page_tdee_dashboard,
@@ -111,6 +108,8 @@ def visualise_data(file_path: str) -> str:
             protein_goal_g, fiber_goal_g, height_cm,
         )
         page_weekly_and_velocity(pdf, processed)
+        if has_garmin_report_data(processed):
+            page_garmin_context(pdf, processed, target_calories)
         page_goal_progress(
             pdf, processed, target_weight_kg, tdee_estimates,
         )

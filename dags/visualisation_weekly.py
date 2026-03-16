@@ -102,8 +102,13 @@ def page_weekly_and_velocity(pdf, processed):
             colColours=["#e1f5fe"] * len(weekly_df.columns),
         )
         tbl.auto_set_font_size(False)
-        tbl.set_fontsize(9)
-        tbl.scale(1.0, 1.8)
+        font_size = 9.0
+        if len(weekly_df.columns) > 9:
+            font_size = 7.5
+        if len(weekly_df.columns) > 11:
+            font_size = 6.5
+        tbl.set_fontsize(font_size)
+        tbl.scale(0.95 if len(weekly_df.columns) > 9 else 1.0, 1.8)
 
         # Conditional coloring on Wt Delta column
         delta_col_idx = list(weekly_df.columns).index("Wt Delta")

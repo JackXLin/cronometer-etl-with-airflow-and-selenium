@@ -187,6 +187,25 @@ class TestBuildWeeklySummaryTable:
         result = build_weekly_summary_table(prepared_df, n_weeks=4)
         assert len(result) <= 4
 
+    def test_includes_garmin_context_columns_when_available(self, prepared_df):
+        """Should surface Garmin weekly context when Garmin columns exist.
+
+        Returns:
+            None
+        """
+        enriched = prepared_df.copy()
+        enriched["garmin_steps"] = np.linspace(5000, 10000, len(enriched))
+        enriched["garmin_sleep_seconds"] = 7 * 3600
+        enriched["garmin_avg_stress"] = 25
+        enriched["garmin_intensity_moderate_min"] = 30
+        enriched["garmin_intensity_vigorous_min"] = 10
+        enriched["garmin_activity_count"] = 1
+
+        result = build_weekly_summary_table(enriched, n_weeks=2)
+
+        for column_name in ["Steps", "Sleep h", "Stress", "Act Min", "Acts"]:
+            assert column_name in result.columns
+
     def test_empty_dataframe(self):
         """Should handle empty input gracefully."""
         df = pd.DataFrame({
