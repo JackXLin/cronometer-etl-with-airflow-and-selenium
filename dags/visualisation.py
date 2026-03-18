@@ -19,6 +19,7 @@ from visualisation_helpers import (
 )
 from visualisation_helpers_v2 import build_strongest_driver_callout
 from visualisation_garmin import has_garmin_report_data, page_garmin_context
+from visualisation_garmin_analytics import render_garmin_analytics_pages
 from visualisation_pages import (
     page_weight_prediction,
     page_tdee_dashboard,
@@ -110,6 +111,7 @@ def visualise_data(file_path: str) -> str:
         page_weekly_and_velocity(pdf, processed)
         if has_garmin_report_data(processed):
             page_garmin_context(pdf, processed, target_calories)
+            render_garmin_analytics_pages(pdf, processed, tdee_estimates)
         page_goal_progress(
             pdf, processed, target_weight_kg, tdee_estimates,
         )

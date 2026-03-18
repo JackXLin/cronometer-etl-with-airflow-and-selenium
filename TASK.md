@@ -1,5 +1,10 @@
 # TASK
 
+## 2026-03-18
+
+- [x] Expand Garmin Connect extraction and PDF reporting to support advanced activity, recovery, lag-analysis, and weekly analytics.
+- [x] Write a detailed changelog entry for the 2026-03-18 Garmin analytics expansion and Airflow log-streaming fix.
+
 ## 2026-03-01
 
 - [x] Fix Page 2 TDEE dashboard layout for:
@@ -17,3 +22,4 @@
 ## Discovered During Work
 
 - [ ] Add pytest collection ignore rules for `logs/scheduler/latest` on Windows (WinError 1920 during full test discovery).
+- [ ] Reduce matplotlib layout warnings on Garmin analytics pages that use tables, colorbars, and twin axes.

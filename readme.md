@@ -29,6 +29,7 @@ This project demonstrates setting up an automated data pipeline using Apache Air
 - Boto3 (for S3 interactions)
 - Pandas
 - Matplotlib
+- Pydantic
 - dotenv (for environment variables)
 - Optional: Garmin Connect account for wearable metrics
 
@@ -55,13 +56,14 @@ environment:
 
 ### Optional Garmin Connect Integration
 
-If you want to enrich the processed dataset with Garmin daily metrics such as steps, sleep, stress, body battery, activity counts, and intensity minutes:
+If you want to enrich the processed dataset with Garmin daily metrics such as steps, distance, active calories, sleep duration and sleep score, stress, body battery, resting heart rate, HRV, respiration, SpO2, training readiness, training status, activity counts, and intensity minutes:
 
 1. Copy `.env.example` to `.env`.
 2. Set `GARMIN_ENABLED=true`.
 3. Fill in `GARMIN_EMAIL` and `GARMIN_PASSWORD`.
 4. Leave `GARMINTOKENS` pointed at `/opt/airflow/config/garmin_tokens` unless you have a different mounted token location.
 5. Adjust `GARMIN_LOOKBACK_DAYS` if you want a different backfill window.
+6. Install the Python dependencies in `requirements.txt`, which now include `pydantic` for Garmin activity/detail row validation.
 
 ## Running the Docker Containers
 
@@ -94,7 +96,21 @@ docker compose run --rm airflow-cli python /opt/airflow/dags/garmin_auth_bootstr
 
 After that, scheduled DAG runs reuse the saved Garmin session non-interactively.
 
-When Garmin columns are present in the processed dataset, the PDF report also adds a Garmin context page with weekly activity summary, sleep and stress trends, body battery / resting-heart-rate context, and simple adherence insights.
+Garmin extraction writes the following artifacts under `/opt/airflow/csvs`:
+
+- `garmin_daily.csv` for flattened day-level Garmin metrics and weekly rollups.
+- `garmin_activities.csv` for normalized Garmin activity-session rows.
+- `garmin_heart_rate_detail.csv` for normalized intraday heart-rate detail rows.
+
+When Garmin columns are present in the processed dataset, the PDF report also adds a Garmin section with:
+
+- A Garmin context page with weekly activity summary, sleep and stress trends, body battery / resting-heart-rate context, and adherence insights.
+- A Garmin-adjusted TDEE context page.
+- Garmin lag heatmaps against daily and trend-based weight change.
+- Weight-spike attribution diagnostics and recovery-vs-scale-noise scatter plots.
+- A weekly energy-balance dashboard.
+- Activity-type contribution summaries and detailed activity-session tables.
+- Recovery regime comparison tables and monthly calendar / coverage views.
 
 ## DAG Configuration
 

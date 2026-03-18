@@ -1,12 +1,20 @@
 # TODO
 
+## In Progress (2026-03-18)
+
+
+## Completed (2026-03-18)
+
+- [x] Expand Garmin Connect extraction and PDF reporting to support advanced activity, recovery, lag-analysis, and weekly analytics.
+- [x] Write a detailed changelog entry for the 2026-03-18 Garmin analytics expansion and Airflow log-streaming fix.
+
 ## Completed (2026-03-16)
 
 - [x] Review Garmin Connect integration status and complete remaining implementation without editing `.env`.
+- [x] Run manual one-time Garmin token bootstrap in the Airflow environment.
 
 ## In Progress (2026-03-16)
 
-- [ ] Run manual one-time Garmin token bootstrap in the Airflow environment.
 
 ## Completed (2026-03-01)
 
@@ -16,3 +24,4 @@
 ## Discovered During Work
 
 - [ ] Configure pytest to skip non-test runtime folders (e.g. `logs/`) in this workspace on Windows.
+- [ ] Reduce matplotlib layout warnings on Garmin analytics pages that use tables, colorbars, and twin axes.
