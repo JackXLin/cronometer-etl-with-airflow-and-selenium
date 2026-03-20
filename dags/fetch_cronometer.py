@@ -1,4 +1,5 @@
 from selenium import webdriver
+from selenium.common.exceptions import ElementClickInterceptedException
 from selenium.webdriver import FirefoxOptions
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -6,78 +7,253 @@ from selenium.webdriver.support import expected_conditions as EC
 import os
 import time
 import glob
+from typing import Optional
 from dotenv import load_dotenv
 
 # Constants for download timeout
 DOWNLOAD_TIMEOUT_SECONDS = 300  # 5 minutes
 DOWNLOAD_CHECK_INTERVAL_SECONDS = 5  # Check every 5 seconds
+DAILY_SUMMARY_OUTPUT_FILENAME = "dailysummary.csv"
+BIOMETRICS_OUTPUT_FILENAME = "biometrics.csv"
 
 
-def wait_for_file_download(download_dir, filename_pattern, timeout=DOWNLOAD_TIMEOUT_SECONDS):
+class CronometerExportError(RuntimeError):
+    """Raised when the Cronometer export workflow cannot complete."""
+
+
+def _get_file_signature(file_path: str) -> tuple[int, int]:
+    """Return a stable signature for a downloaded file.
+
+    Args:
+        file_path (str): Path to the downloaded file.
+
+    Returns:
+        tuple[int, int]: File modification time in nanoseconds and file size.
     """
-    Wait for a file matching the pattern to appear in the download directory.
+    file_stat = os.stat(file_path)
+    return file_stat.st_mtime_ns, file_stat.st_size
+
+
+def _list_complete_files(download_dir: str, filename_pattern: str) -> list[str]:
+    """List fully downloaded files matching a glob pattern.
 
     Args:
         download_dir (str): Directory where files are downloaded.
-        filename_pattern (str): Glob pattern to match the file (e.g., '*daily*.csv').
-        timeout (int): Maximum time to wait in seconds (default: 300 = 5 minutes).
+        filename_pattern (str): Glob pattern to match candidate files.
 
     Returns:
-        str: Path to the downloaded file if found, None otherwise.
+        list[str]: Matching files with temporary browser artifacts removed.
+    """
+    search_pattern = os.path.join(download_dir, filename_pattern)
+    matching_files = glob.glob(search_pattern)
+    return [
+        file_path
+        for file_path in matching_files
+        if not file_path.endswith((".part", ".crdownload", ".tmp"))
+    ]
+
+
+def snapshot_matching_files(
+    download_dir: str,
+    filename_pattern: str,
+) -> dict[str, tuple[int, int]]:
+    """Capture matching files before triggering a new download.
+
+    Args:
+        download_dir (str): Directory where files are downloaded.
+        filename_pattern (str): Glob pattern to match candidate files.
+
+    Returns:
+        dict[str, tuple[int, int]]: File paths mapped to modification-time and size signatures.
+    """
+    return {
+        file_path: _get_file_signature(file_path)
+        for file_path in _list_complete_files(download_dir, filename_pattern)
+    }
+
+
+def wait_for_file_download(
+    download_dir: str,
+    filename_pattern: str,
+    timeout: int = DOWNLOAD_TIMEOUT_SECONDS,
+    existing_files: Optional[dict[str, tuple[int, int]]] = None,
+) -> str:
+    """Wait for a new or updated downloaded file to appear.
+
+    Args:
+        download_dir (str): Directory where files are downloaded.
+        filename_pattern (str): Glob pattern to match the file.
+        timeout (int): Maximum time to wait in seconds.
+        existing_files (Optional[dict[str, tuple[int, int]]]): Snapshot of matching
+            files captured before the export was triggered.
+
+    Returns:
+        str: Path to the new or updated file if found.
     """
     start_time = time.time()
-    search_pattern = os.path.join(download_dir, filename_pattern)
-    
+    known_files = existing_files or {}
+
     print(f"Waiting for file matching '{filename_pattern}' in {download_dir}...")
     print(f"Timeout set to {timeout} seconds ({timeout // 60} minutes)")
-    
+
     while time.time() - start_time < timeout:
-        # Check for matching files (excluding partial downloads)
-        matching_files = glob.glob(search_pattern)
-        # Filter out partial downloads (.part, .crdownload, .tmp files)
-        complete_files = [
-            f for f in matching_files 
-            if not f.endswith(('.part', '.crdownload', '.tmp'))
+        complete_files = _list_complete_files(download_dir, filename_pattern)
+        new_or_updated_files = [
+            file_path
+            for file_path in complete_files
+            if file_path not in known_files
+            or _get_file_signature(file_path) != known_files[file_path]
         ]
-        
-        if complete_files:
-            # Get the most recently modified file
-            latest_file = max(complete_files, key=os.path.getmtime)
+
+        if new_or_updated_files:
+            latest_file = max(new_or_updated_files, key=os.path.getmtime)
             elapsed = time.time() - start_time
             print(f"File found: {latest_file} (after {elapsed:.1f} seconds)")
             return latest_file
-        
+
         elapsed = time.time() - start_time
         print(f"Waiting for download... ({elapsed:.0f}/{timeout} seconds)")
         time.sleep(DOWNLOAD_CHECK_INTERVAL_SECONDS)
-    
+
     print(f"Timeout: File not found after {timeout} seconds")
-    return None
+    raise TimeoutError("File download timed out")
 
-def select_all_time(driver, wait):
-    # Locate the dropdown button using a suitable XPath
+
+def _move_download_to_canonical_path(downloaded_file_path: str, destination_path: str) -> str:
+    """Move a downloaded export to the canonical DAG filename.
+
+    Args:
+        downloaded_file_path (str): Path to the downloaded export.
+        destination_path (str): Canonical output path expected by the DAG.
+
+    Returns:
+        str: Canonical output path.
+    """
+    source_path = os.path.abspath(downloaded_file_path)
+    target_path = os.path.abspath(destination_path)
+    if source_path == target_path:
+        return target_path
+
+    os.replace(source_path, target_path)
+    return target_path
+
+
+def _dismiss_known_overlays(driver: webdriver.Firefox) -> bool:
+    """Dismiss or hide known overlays that block Cronometer export clicks.
+
+    Args:
+        driver (webdriver.Firefox): Selenium Firefox driver.
+
+    Returns:
+        bool: True when a blocking overlay was dismissed or hidden.
+    """
+    overlay_removed = driver.execute_script(
+        """
+        const overlaySelectors = [
+            '.ncmp__banner-inner',
+            '.ncmp__banner',
+            '[class*="ncmp__banner"]',
+        ];
+        const dismissLabels = ['accept', 'agree', 'ok', 'okay', 'close', 'got it', 'dismiss'];
+        for (const selector of overlaySelectors) {
+            const overlay = document.querySelector(selector);
+            if (!overlay) {
+                continue;
+            }
+            const buttons = overlay.querySelectorAll('button, [role="button"], a');
+            for (const button of buttons) {
+                const label = (button.textContent || '').trim().toLowerCase();
+                if (dismissLabels.some((candidate) => label.includes(candidate))) {
+                    button.click();
+                    return true;
+                }
+            }
+            overlay.style.setProperty('display', 'none', 'important');
+            overlay.style.setProperty('visibility', 'hidden', 'important');
+            overlay.style.setProperty('pointer-events', 'none', 'important');
+            if (overlay.parentElement) {
+                overlay.parentElement.style.setProperty('pointer-events', 'none', 'important');
+            }
+            return true;
+        }
+        return false;
+        """
+    )
+    return bool(overlay_removed)
+
+
+def _click_element(
+    driver: webdriver.Firefox,
+    wait: WebDriverWait,
+    locator: tuple[str, str],
+    description: str,
+) -> None:
+    """Click a Cronometer UI element with retries.
+
+    Args:
+        driver (webdriver.Firefox): Selenium Firefox driver.
+        wait (WebDriverWait): Explicit wait helper.
+        locator (tuple[str, str]): Selenium locator for the element.
+        description (str): Human-readable element description for logs.
+
+    Returns:
+        None
+
+    Raises:
+        CronometerExportError: If the element cannot be clicked after retries.
+    """
+    last_error: Optional[Exception] = None
+    artifact_prefix = description.lower().replace(" ", "_")
+    for _ in range(3):
+        try:
+            element = wait.until(EC.element_to_be_clickable(locator))
+            print(f"{description} found")
+            driver.execute_script("arguments[0].scrollIntoView(true);", element)
+            time.sleep(1)
+            try:
+                element.click()
+            except ElementClickInterceptedException as exc:
+                last_error = exc
+                overlay_dismissed = _dismiss_known_overlays(driver)
+                time.sleep(1)
+                element = wait.until(EC.element_to_be_clickable(locator))
+                driver.execute_script("arguments[0].scrollIntoView(true);", element)
+                driver.execute_script("arguments[0].click();", element)
+                if overlay_dismissed:
+                    print(f"Dismissed blocking overlay before clicking {description}.")
+            print(f"{description} clicked")
+            return
+        except Exception as exc:
+            last_error = exc
+            time.sleep(1)
+
+    driver.save_screenshot(f"{artifact_prefix}_click_failed.png")
+    raise CronometerExportError(
+        f"Failed to click {description} after multiple attempts."
+    ) from last_error
+
+
+def select_all_time(driver: webdriver.Firefox, wait: WebDriverWait) -> None:
+    """Select the `All Time` export range in Cronometer.
+
+    Args:
+        driver (webdriver.Firefox): Selenium Firefox driver.
+        wait (WebDriverWait): Explicit wait helper.
+
+    Returns:
+        None
+
+    Raises:
+        CronometerExportError: If the export range cannot be set to `All Time`.
+    """
     dropdown_button_xpath = "//div[contains(@class, 'select-pretty')]//button"
-    dropdown_button = wait.until(EC.element_to_be_clickable((By.XPATH, dropdown_button_xpath)))
-    print("Dropdown button found")
-
-    # Ensure the dropdown button is in view
-    driver.execute_script("arguments[0].scrollIntoView(true);", dropdown_button)
-    time.sleep(1)  # Add a short sleep to ensure scrolling is complete
-
-    # Click the dropdown button
-    try:
-        dropdown_button.click()
-        print("Dropdown button clicked")
-    except Exception as e:
-        print(f"Failed to click the dropdown button. Exception: {str(e)}")
-        driver.save_screenshot('dropdown_button_click_failed.png')
-        driver.quit()
-        exit()
-
-    # Adding a short sleep to ensure the dropdown options are loaded
+    _click_element(
+        driver,
+        wait,
+        (By.XPATH, dropdown_button_xpath),
+        "Dropdown button",
+    )
     time.sleep(2)
-
-    # Directly set the value using JavaScript
     driver.execute_script("""
         var dropdown = document.querySelector('.select-pretty .dropdown-btn');
         var options = document.querySelectorAll('a.gwt-Anchor.dropdown-item');
@@ -88,37 +264,72 @@ def select_all_time(driver, wait):
         });
         dropdown.textContent = 'All Time';
     """)
-
-    # Verify the selected option
-    time.sleep(2)  # Wait for the option to be set
-    selected_option = driver.execute_script("return document.querySelector('.select-pretty .dropdown-btn').textContent.trim();")
+    time.sleep(2)
+    selected_option = driver.execute_script(
+        "return document.querySelector('.select-pretty .dropdown-btn').textContent.trim();"
+    )
     print(f"Selected option: {selected_option}")
 
     if selected_option != "All Time":
-        print("Failed to select 'All Time' option. Exiting.")
-        driver.save_screenshot('failed_to_select_all_time.png')
-        with open('page_source_failed_selection.html', 'w', encoding='utf-8') as f:
-            f.write(driver.page_source)
-        driver.quit()
-        exit()
+        driver.save_screenshot("failed_to_select_all_time.png")
+        with open("page_source_failed_selection.html", "w", encoding="utf-8") as page_source_file:
+            page_source_file.write(driver.page_source)
+        raise CronometerExportError(
+            "Failed to select `All Time` in the Cronometer export dialog."
+        )
 
-def cronometer_export():
+
+def _open_export_data_modal(driver: webdriver.Firefox, wait: WebDriverWait) -> None:
+    """Open the Cronometer export modal.
+
+    Args:
+        driver (webdriver.Firefox): Selenium Firefox driver.
+        wait (WebDriverWait): Explicit wait helper.
+
+    Returns:
+        None
+    """
+    _click_element(
+        driver,
+        wait,
+        (By.XPATH, "//button[text()='Export Data']"),
+        "Export Data button",
+    )
+    wait.until(EC.visibility_of_element_located((By.CLASS_NAME, "titlebar-container")))
+
+
+def cronometer_export() -> None:
+    """Export Cronometer daily nutrition and biometrics CSVs.
+
+    Args:
+        None
+
+    Returns:
+        None
+
+    Raises:
+        TimeoutError: If either Cronometer export does not download in time.
+        CronometerExportError: If the Selenium workflow cannot complete.
+        FileNotFoundError: If canonical output files are missing after export.
+    """
     load_dotenv()
     username = os.getenv("CRONOMETER_USERNAME")
     password = os.getenv("CRONOMETER_PASSWORD")
 
-    # Setup Firefox options
     options = FirefoxOptions()
     options.add_argument("--headless")
 
-    # Set download directory
     download_dir = "/opt/airflow/csvs"
+    daily_summary_output_path = os.path.join(download_dir, DAILY_SUMMARY_OUTPUT_FILENAME)
+    biometrics_output_path = os.path.join(download_dir, BIOMETRICS_OUTPUT_FILENAME)
     options.set_preference("browser.download.folderList", 2)
     options.set_preference("browser.download.manager.showWhenStarting", False)
     options.set_preference("browser.download.dir", download_dir)
-    options.set_preference("browser.helperApps.neverAsk.saveToDisk", "text/csv,application/csv,application/octet-stream")
+    options.set_preference(
+        "browser.helperApps.neverAsk.saveToDisk",
+        "text/csv,application/csv,application/octet-stream",
+    )
 
-    # Pass the options to the Firefox driver
     driver = webdriver.Firefox(options=options)
 
     try:
@@ -127,87 +338,72 @@ def cronometer_export():
         wait = WebDriverWait(driver, 20)
         email_field = wait.until(EC.visibility_of_element_located((By.ID, "username")))
         password_field = wait.until(EC.visibility_of_element_located((By.ID, "password")))
-        submit_button = wait.until(EC.element_to_be_clickable((By.XPATH, '//button[span[@id="login_txt"]]')))
+        submit_button = wait.until(
+            EC.element_to_be_clickable((By.XPATH, '//button[span[@id="login_txt"]]'))
+        )
 
         email_field.send_keys(username)
         password_field.send_keys(password)
         submit_button.click()
 
-        # Wait for the sidebar to be present
-        sidebar_wrapper = wait.until(EC.visibility_of_element_located((By.CLASS_NAME, "sidebar-wrapper")))
+        wait.until(EC.visibility_of_element_located((By.CLASS_NAME, "sidebar-wrapper")))
+        _click_element(driver, wait, (By.XPATH, "//span[text()='More']"), "More button")
+        _click_element(driver, wait, (By.XPATH, "//a[@href='#account']"), "Account link")
 
-        # Now wait for the "More" button to be clickable
-        more_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//span[text()='More']")))
-
-        # Perform actions on the "More" button
-        more_button.click()
-
-        # Wait for the "Account" link to be present and click it
-        account_link = wait.until(EC.visibility_of_element_located((By.XPATH, "//a[@href='#account']")))
-        account_link.click()
-
-        # Wait for the "Export Data" button to be visible
-        export_data_button = wait.until(EC.visibility_of_element_located((By.XPATH, "//button[text()='Export Data']")))
-
-        # Scroll the "Export Data" button into view and click it
-        driver.execute_script("arguments[0].scrollIntoView(true);", export_data_button)
-        driver.execute_script("arguments[0].click();", export_data_button)
-
-        # Wait for the popup to be visible
-        popup = wait.until(EC.visibility_of_element_located((By.CLASS_NAME, "titlebar-container")))
-
-        # Select "All Time" for the first export
+        _open_export_data_modal(driver, wait)
         select_all_time(driver, wait)
 
-        # Scroll the "Export Daily Nutrition" button into view and click it
-        export_daily_nutrition_button = wait.until(
-            EC.element_to_be_clickable((By.XPATH, '//button[contains(text(), "Export Daily Nutrition")]'))
+        existing_daily_files = snapshot_matching_files(download_dir, "*daily*.csv")
+        _click_element(
+            driver,
+            wait,
+            (By.XPATH, '//button[contains(text(), "Export Daily Nutrition")]'),
+            "Export Daily Nutrition button",
         )
-        driver.execute_script("arguments[0].scrollIntoView(true);", export_daily_nutrition_button)
-        driver.execute_script("arguments[0].click();", export_daily_nutrition_button)
-
-        # Wait for daily summary CSV to download (up to 5 minutes)
         daily_summary_file = wait_for_file_download(
-            download_dir, 
-            '*daily*.csv',  # Matches dailysummary.csv or daily-summary.csv
-            timeout=DOWNLOAD_TIMEOUT_SECONDS
+            download_dir,
+            "*daily*.csv",
+            timeout=DOWNLOAD_TIMEOUT_SECONDS,
+            existing_files=existing_daily_files,
         )
-        
-        if daily_summary_file is None:
-            print("ERROR: Daily summary CSV download failed or timed out!")
-            driver.save_screenshot('daily_summary_download_failed.png')
-            raise TimeoutError("Daily summary CSV download timed out after 5 minutes")
+        daily_summary_file = _move_download_to_canonical_path(
+            daily_summary_file,
+            daily_summary_output_path,
+        )
 
-        # Re-select "All Time" for the second export
-        # Scroll the "Export Data" button into view and click it
-        driver.execute_script("arguments[0].scrollIntoView(true);", export_data_button)
-        driver.execute_script("arguments[0].click();", export_data_button)
-
-        # Wait for the popup to be visible again
-        popup = wait.until(EC.visibility_of_element_located((By.CLASS_NAME, "titlebar-container")))
-
+        _open_export_data_modal(driver, wait)
         select_all_time(driver, wait)
 
-        # Interact with the "Export Biometrics" button
-        export_biometrics_button = wait.until(
-            EC.element_to_be_clickable((By.XPATH, '//button[contains(text(), "Export Biometrics")]'))
+        existing_biometrics_files = snapshot_matching_files(download_dir, "*biometric*.csv")
+        _click_element(
+            driver,
+            wait,
+            (By.XPATH, '//button[contains(text(), "Export Biometrics")]'),
+            "Export Biometrics button",
         )
-        driver.execute_script("arguments[0].scrollIntoView(true);", export_biometrics_button)
-        driver.execute_script("arguments[0].click();", export_biometrics_button)
-
-        # Wait for biometrics CSV to download (up to 5 minutes)
         biometrics_file = wait_for_file_download(
             download_dir,
-            '*biometric*.csv',  # Matches biometrics.csv
-            timeout=DOWNLOAD_TIMEOUT_SECONDS
+            "*biometric*.csv",
+            timeout=DOWNLOAD_TIMEOUT_SECONDS,
+            existing_files=existing_biometrics_files,
         )
-        
-        if biometrics_file is None:
-            print("ERROR: Biometrics CSV download failed or timed out!")
-            driver.save_screenshot('biometrics_download_failed.png')
-            raise TimeoutError("Biometrics CSV download timed out after 5 minutes")
+        biometrics_file = _move_download_to_canonical_path(
+            biometrics_file,
+            biometrics_output_path,
+        )
 
-        # Print a confirmation message
-        print("Downloaded CSVs successfully!")
+        if not os.path.exists(daily_summary_file):
+            raise FileNotFoundError(
+                f"Daily summary CSV not found at `{daily_summary_file}` after export."
+            )
+        if not os.path.exists(biometrics_file):
+            raise FileNotFoundError(
+                f"Biometrics CSV not found at `{biometrics_file}` after export."
+            )
+
+        print(
+            "Downloaded Cronometer CSVs successfully to "
+            f"{daily_summary_file} and {biometrics_file}!"
+        )
     finally:
         driver.quit()

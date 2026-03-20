@@ -244,12 +244,12 @@ class TestNormalizeGarminDay:
 class TestFetchGarminDailyData:
     """Tests for end-to-end Garmin CSV generation."""
 
-    def test_expected_use_writes_normalized_csv(
+    def test_expected_use_writes_initial_backfill_csv(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
-        """Should write one CSV row per requested date.
+        """Should write one CSV row per requested date during initial backfill.
 
         Args:
             monkeypatch (pytest.MonkeyPatch): Pytest patch helper.
@@ -259,11 +259,27 @@ class TestFetchGarminDailyData:
             None
         """
         output_path = tmp_path / "garmin_daily.csv"
+        class FixedDate(date):
+            """Fixed date helper for deterministic fetch windows."""
+
+            @classmethod
+            def today(cls) -> date:
+                """Return the fixed current date.
+
+                Returns:
+                    date: Fixed sync end date.
+                """
+                return cls(2025, 1, 2)
+
+        monkeypatch.setattr(fetch_garmin, "date", FixedDate)
         monkeypatch.setattr(fetch_garmin, "load_garmin_client_from_tokens", lambda: object())
+        monkeypatch.setenv("GARMIN_HISTORICAL_START_DATE", "2025-01-01")
+        monkeypatch.setenv("GARMIN_SYNC_OVERLAP_DAYS", "2")
+        monkeypatch.delenv("GARMIN_FORCE_FULL_REFRESH", raising=False)
         monkeypatch.setattr(
             fetch_garmin,
-            "build_date_range",
-            lambda lookback_days: ["2025-01-01", "2025-01-02"],
+            "build_date_range_from_bounds",
+            lambda start_date, end_date: ["2025-01-01", "2025-01-02"],
         )
         monkeypatch.setattr(
             fetch_garmin,
@@ -283,6 +299,92 @@ class TestFetchGarminDailyData:
         assert result == str(output_path)
         assert list(written["Date"]) == ["2025-01-01", "2025-01-02"]
         assert list(written["garmin_steps"]) == [1000, 2000]
+
+    def test_edge_case_incremental_sync_merges_existing_history(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Should reuse stored Garmin history and fetch only the overlap window.
+
+        Args:
+            monkeypatch (pytest.MonkeyPatch): Pytest patch helper.
+            tmp_path (Path): Temporary output directory.
+
+        Returns:
+            None
+        """
+        output_path = tmp_path / "garmin_daily.csv"
+        pd.DataFrame(
+            {
+                "Date": ["2025-01-02", "2025-01-03"],
+                "garmin_steps": [1200, 1300],
+            }
+        ).to_csv(output_path, index=False)
+
+        class FixedDate(date):
+            """Fixed date helper for deterministic fetch windows."""
+
+            @classmethod
+            def today(cls) -> date:
+                """Return the fixed current date.
+
+                Returns:
+                    date: Fixed sync end date.
+                """
+                return cls(2025, 1, 4)
+
+        captured_bounds: dict[str, date] = {}
+        original_build_date_range = fetch_garmin.build_date_range_from_bounds
+
+        def _capture_date_range(start_date: date, end_date: date) -> list[str]:
+            """Capture resolved sync bounds before building the date list.
+
+            Args:
+                start_date (date): Inclusive sync start date.
+                end_date (date): Inclusive sync end date.
+
+            Returns:
+                list[str]: Ordered sync dates.
+            """
+            captured_bounds["start"] = start_date
+            captured_bounds["end"] = end_date
+            return original_build_date_range(start_date, end_date)
+
+        monkeypatch.setattr(fetch_garmin, "date", FixedDate)
+        monkeypatch.setattr(fetch_garmin, "load_garmin_client_from_tokens", lambda: object())
+        monkeypatch.setenv("GARMIN_HISTORICAL_START_DATE", "2025-01-01")
+        monkeypatch.setenv("GARMIN_SYNC_OVERLAP_DAYS", "2")
+        monkeypatch.delenv("GARMIN_FORCE_FULL_REFRESH", raising=False)
+        monkeypatch.setattr(fetch_garmin, "build_date_range_from_bounds", _capture_date_range)
+        monkeypatch.setattr(
+            fetch_garmin,
+            "normalize_garmin_day",
+            lambda client, date_str: {
+                "Date": date_str,
+                "garmin_steps": {
+                    "2025-01-01": 1000,
+                    "2025-01-02": 2000,
+                    "2025-01-03": 3000,
+                    "2025-01-04": 4000,
+                }[date_str],
+            },
+        )
+
+        result = fetch_garmin.fetch_garmin_daily_data(output_path=str(output_path))
+        written = pd.read_csv(result)
+
+        assert captured_bounds == {
+            "start": date(2025, 1, 1),
+            "end": date(2025, 1, 4),
+        }
+        assert list(written["Date"]) == [
+            "2025-01-01",
+            "2025-01-02",
+            "2025-01-03",
+            "2025-01-04",
+        ]
+        assert list(written["garmin_steps"]) == [1000, 2000, 3000, 4000]
 
     def test_invalid_env_lookback_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Should reject invalid Garmin lookback configuration.

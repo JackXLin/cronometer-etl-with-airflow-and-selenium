@@ -75,6 +75,8 @@ The Garmin ingestion path was reviewed and confirmed across the following module
 - The file cleanup task removes prior Garmin output before new runs.
 - The runtime fetch path uses the persisted token store rather than re-running interactive authentication.
 
+Note: The cleanup behavior above was later superseded by the 2026-03-20 historical-sync update, which preserves Garmin artifacts between runs so the mounted CSV directory can act as the long-lived Garmin history store.
+
 ### Follow-up extraction fix after report review
 
 During follow-up review against a real `garmin_daily.csv` sample, it became clear that the CSV header still stopped at:

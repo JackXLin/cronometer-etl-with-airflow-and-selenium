@@ -59,19 +59,21 @@ environment:
 If you want to enrich the processed dataset with Garmin daily metrics such as steps, distance, active calories, sleep duration and sleep score, stress, body battery, resting heart rate, HRV, respiration, SpO2, training readiness, training status, activity counts, and intensity minutes:
 
 1. Copy `.env.example` to `.env`.
-2. Set `GARMIN_ENABLED=true`.
-3. Fill in `GARMIN_EMAIL` and `GARMIN_PASSWORD`.
+2. Set `GARMIN_ENABLED=true` so the DAG merges Garmin data into `processed_data.csv` and the PDF report. Keep this enabled even if you have already pre-seeded the Garmin CSV artifacts manually.
+3. Fill in `GARMIN_EMAIL` and `GARMIN_PASSWORD` only when you need to run the one-time bootstrap helper or refresh expired Garmin tokens.
 4. Leave `GARMINTOKENS` pointed at `/opt/airflow/config/garmin_tokens` unless you have a different mounted token location.
-5. Adjust `GARMIN_LOOKBACK_DAYS` if you want a different backfill window.
-6. Install the Python dependencies in `requirements.txt`, which now include `pydantic` for Garmin activity/detail row validation.
+5. Set `GARMIN_HISTORICAL_START_DATE` to the first day you want included in the first API backfill when no Garmin history has already been pre-seeded.
+6. Leave `GARMIN_SYNC_OVERLAP_DAYS=2` unless you want a larger overlap window for late Garmin corrections.
+7. Use `GARMIN_FORCE_FULL_REFRESH=true` only when you want the next run to rebuild the Garmin store from scratch, then return it to `false`.
+8. Keep `GARMIN_LOOKBACK_DAYS` only as a legacy fallback when `GARMIN_HISTORICAL_START_DATE` is not configured.
+9. Install the Python dependencies in `requirements.txt`, which now include `pydantic` for Garmin activity/detail row validation.
 
 ## Running the Docker Containers
 
 Build and run the Docker containers:
 
 ```bash
-docker-compose build
-docker-compose up -d
+docker compose up -d --build
 ```
 
 ## Garmin Token Bootstrap
@@ -94,13 +96,31 @@ example command:
 docker compose run --rm airflow-cli python /opt/airflow/dags/garmin_auth_bootstrap.py
 ```
 
-After that, scheduled DAG runs reuse the saved Garmin session non-interactively.
+After that, scheduled DAG runs reuse the saved Garmin session non-interactively from `GARMINTOKENS`. `GARMIN_EMAIL` and `GARMIN_PASSWORD` are only needed when you run the bootstrap helper again.
 
 Garmin extraction writes the following artifacts under `/opt/airflow/csvs`:
 
 - `garmin_daily.csv` for flattened day-level Garmin metrics and weekly rollups.
 - `garmin_activities.csv` for normalized Garmin activity-session rows.
 - `garmin_heart_rate_detail.csv` for normalized intraday heart-rate detail rows.
+
+If you already have a Garmin bulk export under the repository `garmin_data/` folder, you can seed those same mounted-volume artifacts before relying on live API syncs:
+
+```bash
+python dags/garmin_export_import.py --export-root garmin_data --output-path "C:\Users\Jack\Downloads\garmin_daily.csv"
+```
+
+This standalone CLI is not part of the scheduled DAG. It writes `garmin_daily.csv`, `garmin_activities.csv`, and `garmin_heart_rate_detail.csv` into the host path that is mounted into Airflow as `/opt/airflow/csvs`, so later DAG runs can continue from that historical store.
+Keep `GARMIN_ENABLED=true` if you want the DAG to merge the seeded Garmin data into `processed_data.csv` and the downstream report pages.
+The current JSON importer fills daily metrics and activity sessions, but it leaves `garmin_heart_rate_detail.csv` empty until a compatible historical intraday heart-rate export source is identified.
+
+Garmin sync now behaves as follows:
+
+- Without a pre-seeded Garmin store, the first API-based DAG run backfills from `GARMIN_HISTORICAL_START_DATE` through today.
+- After a manual historical seed or any earlier Garmin sync, the DAG reads the latest stored Garmin date and re-fetches from `last_stored_date - GARMIN_SYNC_OVERLAP_DAYS` through today.
+- Garmin artifacts are preserved across DAG runs, so the mounted CSV directory now acts as the historical Garmin store.
+- The initial API historical backfill can take much longer than later daily syncs because Garmin extraction queries multiple endpoint families per day.
+- If you need to rebuild the Garmin store, set `GARMIN_FORCE_FULL_REFRESH=true` for one run and then return it to `false`.
 
 When Garmin columns are present in the processed dataset, the PDF report also adds a Garmin section with:
 
@@ -117,7 +137,7 @@ When Garmin columns are present in the processed dataset, the PDF report also ad
 Create a DAG to automate the entire process. The DAG should include tasks for:
 
 1. Fetching the CSV data from Cronometer.
-2. Optionally fetching Garmin daily data when `GARMIN_ENABLED=true`.
+2. Optionally fetching or incrementally refreshing Garmin daily data when `GARMIN_ENABLED=true`.
 3. Processing the CSV data.
 4. Visualising the processed data.
 5. Uploading the visualisation to S3.

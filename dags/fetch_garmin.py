@@ -1,12 +1,10 @@
 """Garmin daily data extraction for the Airflow pipeline."""
 
 import logging
-import os
-from datetime import date, timedelta
+from datetime import date
 from time import perf_counter
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-import numpy as np
 import pandas as pd
 
 from garmin_activity_normalization import (
@@ -24,14 +22,27 @@ from garmin_daily_normalization import (
     _extract_duration_minutes,
     _extract_nested_value,
 )
+from garmin_sync_storage import (
+    build_date_range,
+    build_date_range_from_bounds,
+    build_supporting_output_paths,
+    get_garmin_historical_start_date,
+    get_garmin_lookback_days,
+    get_garmin_sync_overlap_days,
+    is_garmin_enabled,
+    is_garmin_force_full_refresh,
+    load_existing_garmin_daily,
+    load_existing_garmin_detail_artifact,
+    merge_garmin_activities,
+    merge_garmin_daily,
+    merge_garmin_heart_rate_detail,
+    resolve_garmin_sync_start_date,
+    write_dataframe_atomically,
+)
 
 
 LOGGER = logging.getLogger(__name__)
-DEFAULT_GARMIN_LOOKBACK_DAYS = 30
 DEFAULT_GARMIN_OUTPUT_PATH = "/opt/airflow/csvs/garmin_daily.csv"
-DEFAULT_GARMIN_ACTIVITY_OUTPUT_PATH = "/opt/airflow/csvs/garmin_activities.csv"
-DEFAULT_GARMIN_HEART_RATE_OUTPUT_PATH = "/opt/airflow/csvs/garmin_heart_rate_detail.csv"
-
 
 def _extract_text_value(
     payload: Any,
@@ -53,23 +64,6 @@ def _extract_text_value(
         cleaned = value.strip()
         return cleaned or None
     return str(value)
-
-
-def _build_supporting_output_paths(output_path: str) -> dict[str, str]:
-    """Resolve sibling artifact paths for Garmin detail outputs.
-
-    Args:
-        output_path (str): Primary Garmin daily CSV path.
-
-    Returns:
-        dict[str, str]: Activity and heart-rate artifact paths.
-    """
-    output_dir = os.path.dirname(output_path) or os.path.dirname(DEFAULT_GARMIN_OUTPUT_PATH)
-    return {
-        "activities": os.path.join(output_dir, os.path.basename(DEFAULT_GARMIN_ACTIVITY_OUTPUT_PATH)),
-        "heart_rate": os.path.join(output_dir, os.path.basename(DEFAULT_GARMIN_HEART_RATE_OUTPUT_PATH)),
-    }
-
 
 def _collect_garmin_day_payloads(client: Any, date_str: str) -> Dict[str, Any]:
     """Fetch the Garmin endpoint payloads used by daily normalization.
@@ -148,7 +142,6 @@ def _collect_garmin_day_payloads(client: Any, date_str: str) -> Dict[str, Any]:
         )
         or {},
     }
-
 
 def _build_normalized_garmin_day(
     date_str: str,
@@ -348,64 +341,6 @@ def _build_normalized_garmin_day(
         ),
     }
 
-
-def is_garmin_enabled() -> bool:
-    """Return whether Garmin ingestion is enabled via environment configuration.
-
-    Returns:
-        bool: True when Garmin ingestion is enabled.
-    """
-    return str(os.getenv("GARMIN_ENABLED", "false")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
-def get_garmin_lookback_days() -> int:
-    """Resolve the Garmin fetch lookback window from the environment.
-
-    Returns:
-        int: Number of daily records to fetch.
-
-    Raises:
-        ValueError: If the configured lookback is not a positive integer.
-    """
-    raw_value = os.getenv("GARMIN_LOOKBACK_DAYS", str(DEFAULT_GARMIN_LOOKBACK_DAYS))
-    lookback_days = int(raw_value)
-    if lookback_days <= 0:
-        raise ValueError("`GARMIN_LOOKBACK_DAYS` must be a positive integer.")
-    return lookback_days
-
-
-def build_date_range(
-    lookback_days: int,
-    end_date: Optional[date] = None,
-) -> List[str]:
-    """Build an inclusive list of ISO date strings for Garmin fetches.
-
-    Args:
-        lookback_days (int): Number of days to include.
-        end_date (date | None): Optional end date override.
-
-    Returns:
-        list[str]: Ordered ISO date strings from oldest to newest.
-
-    Raises:
-        ValueError: If `lookback_days` is not positive.
-    """
-    if lookback_days <= 0:
-        raise ValueError("`lookback_days` must be positive.")
-
-    effective_end_date = end_date or date.today()
-    start_date = effective_end_date - timedelta(days=lookback_days - 1)
-    return [
-        (start_date + timedelta(days=offset)).isoformat()
-        for offset in range(lookback_days)
-    ]
-
-
 def normalize_garmin_day(client: Any, date_str: str) -> Dict[str, Any]:
     """Normalize Garmin API payloads into a single flat daily record.
 
@@ -433,15 +368,13 @@ def normalize_garmin_day(client: Any, date_str: str) -> Dict[str, Any]:
         heart_rate_rows,
     )
 
-
 _ORIGINAL_NORMALIZE_GARMIN_DAY = normalize_garmin_day
-
 
 def fetch_garmin_daily_data(
     lookback_days: Optional[int] = None,
     output_path: str = DEFAULT_GARMIN_OUTPUT_PATH,
 ) -> str:
-    """Fetch and persist normalized Garmin daily metrics for the recent date range.
+    """Fetch and persist Garmin history using backfill and incremental sync.
 
     Args:
         lookback_days (int | None): Optional override for lookback days.
@@ -456,19 +389,50 @@ def fetch_garmin_daily_data(
         GarminServiceError: If Garmin data cannot be fetched reliably.
         ValueError: If the lookback window is invalid.
     """
+    effective_end_date = date.today()
     effective_lookback_days = lookback_days or get_garmin_lookback_days()
+    historical_start_date = get_garmin_historical_start_date(
+        end_date=effective_end_date,
+        fallback_lookback_days=effective_lookback_days,
+    )
+    overlap_days = get_garmin_sync_overlap_days()
+    force_full_refresh = is_garmin_force_full_refresh()
+    supporting_paths = build_supporting_output_paths(output_path)
+    existing_daily = None
+    existing_activities = None
+    existing_heart_rate = None
+    if not force_full_refresh:
+        existing_daily = load_existing_garmin_daily(output_path)
+        existing_activities = load_existing_garmin_detail_artifact(
+            supporting_paths["activities"]
+        )
+        existing_heart_rate = load_existing_garmin_detail_artifact(
+            supporting_paths["heart_rate"]
+        )
+    sync_start_date = resolve_garmin_sync_start_date(
+        existing_daily,
+        historical_start_date,
+        overlap_days,
+        force_full_refresh=force_full_refresh,
+    )
+    sync_mode = "incremental sync"
+    if force_full_refresh:
+        sync_mode = "forced full refresh"
+    elif existing_daily is None or existing_daily.empty:
+        sync_mode = "initial backfill"
+    date_strings = build_date_range_from_bounds(sync_start_date, effective_end_date)
     LOGGER.info(
-        "Starting Garmin fetch for the last %s day(s) into %s.",
-        effective_lookback_days,
+        "Starting Garmin %s from %s to %s into %s.",
+        sync_mode,
+        sync_start_date.isoformat(),
+        effective_end_date.isoformat(),
         output_path,
     )
     client = load_garmin_client_from_tokens()
-    date_strings = build_date_range(effective_lookback_days)
     LOGGER.info(
         "Garmin client restored successfully. Fetching %s date(s).",
         len(date_strings),
     )
-    supporting_paths = _build_supporting_output_paths(output_path)
     rows: list[dict[str, Any]] = []
     activity_rows: list[dict[str, Any]] = []
     heart_rate_rows: list[dict[str, Any]] = []
@@ -511,43 +475,23 @@ def fetch_garmin_daily_data(
             perf_counter() - day_started_at,
         )
 
-    garmin_daily = pd.DataFrame(rows)
-    if not garmin_daily.empty:
-        garmin_daily = garmin_daily.sort_values("Date").reset_index(drop=True)
-        for column_name in [
-            "garmin_steps",
-            "garmin_avg_stress",
-            "garmin_intensity_moderate_min",
-            "garmin_intensity_vigorous_min",
-        ]:
-            if column_name not in garmin_daily.columns:
-                garmin_daily[column_name] = np.nan
-            garmin_daily[column_name] = pd.to_numeric(
-                garmin_daily[column_name],
-                errors="coerce",
-            )
-        garmin_daily["garmin_weekly_steps"] = garmin_daily["garmin_steps"].rolling(
-            7,
-            min_periods=1,
-        ).sum()
-        garmin_daily["garmin_weekly_avg_stress"] = garmin_daily["garmin_avg_stress"].rolling(
-            7,
-            min_periods=1,
-        ).mean()
-        total_intensity = (
-            garmin_daily["garmin_intensity_moderate_min"].fillna(0)
-            + garmin_daily["garmin_intensity_vigorous_min"].fillna(0)
-        )
-        garmin_daily["garmin_weekly_intensity_min"] = total_intensity.rolling(
-            7,
-            min_periods=1,
-        ).sum()
-    garmin_daily.to_csv(output_path, index=False)
-    pd.DataFrame(activity_rows).to_csv(supporting_paths["activities"], index=False)
-    pd.DataFrame(heart_rate_rows).to_csv(supporting_paths["heart_rate"], index=False)
+    fetched_daily = pd.DataFrame(rows)
+    fetched_activities = pd.DataFrame(activity_rows)
+    fetched_heart_rate = pd.DataFrame(heart_rate_rows)
+    garmin_daily = merge_garmin_daily(existing_daily, fetched_daily)
+    garmin_activities = merge_garmin_activities(existing_activities, fetched_activities)
+    garmin_heart_rate = merge_garmin_heart_rate_detail(
+        existing_heart_rate,
+        fetched_heart_rate,
+    )
+    write_dataframe_atomically(garmin_daily, output_path)
+    write_dataframe_atomically(garmin_activities, supporting_paths["activities"])
+    write_dataframe_atomically(garmin_heart_rate, supporting_paths["heart_rate"])
     LOGGER.info(
-        "Wrote %s Garmin daily rows to %s and supporting detail artifacts to %s / %s.",
+        "Wrote %s Garmin daily rows, %s Garmin activity rows, and %s Garmin heart-rate rows to %s / %s / %s.",
         len(garmin_daily.index),
+        len(garmin_activities.index),
+        len(garmin_heart_rate.index),
         output_path,
         supporting_paths["activities"],
         supporting_paths["heart_rate"],
