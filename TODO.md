@@ -1,7 +1,15 @@
 # TODO
 
+## In Progress (2026-03-23)
+
+
 ## In Progress (2026-03-20)
 
+
+## Completed (2026-03-23)
+
+- [x] Improve Garmin analytics visual clarity and layout for the TDEE context, activity regimes, lag heatmaps, recovery scatter, activity-type contribution, and coverage table.
+- [x] Write a changelog entry for the 2026-03-23 Garmin visualization refinement work.
 
 ## Completed (2026-03-20)
 

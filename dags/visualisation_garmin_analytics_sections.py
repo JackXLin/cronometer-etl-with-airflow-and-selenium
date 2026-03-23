@@ -133,11 +133,12 @@ def page_activity_type_contribution(pdf, processed: pd.DataFrame, activity_df: p
     Returns:
         None
     """
-    fig = plt.figure(figsize=(16.5, 13.5))
-    gs = gridspec.GridSpec(3, 1, height_ratios=[1.08, 0.58, 0.88], hspace=0.34)
+    fig = plt.figure(figsize=(16.8, 13.8))
+    gs = gridspec.GridSpec(2, 1, height_ratios=[1.05, 1.0], hspace=0.34)
     ax_chart = fig.add_subplot(gs[0, 0])
-    ax_summary = fig.add_subplot(gs[1, 0])
-    ax_sessions = fig.add_subplot(gs[2, 0])
+    bottom_gs = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=gs[1, 0], width_ratios=[0.9, 1.4], wspace=0.18)
+    ax_summary = fig.add_subplot(bottom_gs[0, 0])
+    ax_sessions = fig.add_subplot(bottom_gs[0, 1])
     if activity_df.empty:
         render_empty_axis(ax_chart, "Activity-Type Contribution", "No Garmin activity sessions were available.")
         render_table(ax_summary, pd.DataFrame(), "Activity-Type Summary")
@@ -153,14 +154,15 @@ def page_activity_type_contribution(pdf, processed: pd.DataFrame, activity_df: p
         ax_chart.set_ylabel("Calories")
         ax_chart.set_xlabel("Week")
         ax_chart.grid(True, alpha=0.2, axis="y")
-        plt.setp(ax_chart.get_xticklabels(), rotation=30, ha="right", fontsize=8)
+        plt.setp(ax_chart.get_xticklabels(), rotation=28, ha="right", fontsize=8)
         ax_chart.legend(
             fontsize=8,
             ncol=max(1, min(4, math.ceil(len(grouped.columns) / 2))),
             loc="upper center",
-            bbox_to_anchor=(0.5, 1.2),
+            bbox_to_anchor=(0.5, 1.14),
             frameon=False,
         )
+        ax_chart.margins(x=0.03)
         summary_table = build_activity_contribution_summary(activity_df, processed).rename(
             columns={
                 "type": "type",
@@ -184,10 +186,25 @@ def page_activity_type_contribution(pdf, processed: pd.DataFrame, activity_df: p
                 "next-day weight change": "next-day Δ",
             }
         )
-        render_table(ax_summary, summary_table, "Activity-Type Summary", font_size=7.8, header_wrap=12)
-        render_table(ax_sessions, session_table, "Activity Session Table", font_size=7.1, header_wrap=12, max_cell_chars=16)
+        render_table(
+            ax_summary,
+            summary_table,
+            "Activity-Type Summary",
+            font_size=8.0,
+            header_wrap=12,
+            bbox=(0.0, 0.04, 1.0, 0.88),
+        )
+        render_table(
+            ax_sessions,
+            session_table,
+            "Activity Session Table",
+            font_size=7.2,
+            header_wrap=12,
+            max_cell_chars=16,
+            bbox=(0.0, 0.04, 1.0, 0.88),
+        )
     fig.suptitle("Activity-Type Contribution", fontsize=15, fontweight="bold")
-    finalize_figure(fig, top=0.89, bottom=0.05, left=0.07, right=0.95, hspace=0.36)
+    finalize_figure(fig, top=0.9, bottom=0.05, left=0.06, right=0.96, hspace=0.34, wspace=0.2)
     pdf.savefig(fig)
     plt.close(fig)
 
@@ -273,8 +290,8 @@ def page_calendar_and_coverage(pdf, processed: pd.DataFrame, activity_df: pd.Dat
     latest_month = processed["Date"].dt.to_period("M").max()
     month_df = processed[processed["Date"].dt.to_period("M") == latest_month].copy()
     latest_month_label = latest_month.to_timestamp().strftime("%b %Y")
-    fig = plt.figure(figsize=(16.5, 12.8))
-    gs = gridspec.GridSpec(3, 2, height_ratios=[1, 1, 0.74], hspace=0.38, wspace=0.32)
+    fig = plt.figure(figsize=(16.5, 11.8))
+    gs = gridspec.GridSpec(2, 2, hspace=0.38, wspace=0.32)
     axes = [
         fig.add_subplot(gs[0, 0]),
         fig.add_subplot(gs[0, 1]),
@@ -285,7 +302,14 @@ def page_calendar_and_coverage(pdf, processed: pd.DataFrame, activity_df: pd.Dat
     plot_month_calendar(axes[1], month_df, "garmin_sleep_score", f"{latest_month_label} Sleep Score")
     plot_month_calendar(axes[2], month_df, "garmin_avg_stress", f"{latest_month_label} Stress")
     plot_month_calendar(axes[3], month_df, "garmin_steps", f"{latest_month_label} Steps")
-    ax_table = fig.add_subplot(gs[2, :])
+    fig.suptitle("Month Calendar Heatmaps", fontsize=15, fontweight="bold")
+    finalize_figure(fig, top=0.9, bottom=0.06, left=0.06, right=0.95, hspace=0.38, wspace=0.32)
+    pdf.savefig(fig)
+    plt.close(fig)
+
+    fig = plt.figure(figsize=(16.5, 10.8))
+    gs = gridspec.GridSpec(1, 1)
+    ax_table = fig.add_subplot(gs[0, 0])
     coverage_table = build_coverage_table(processed, activity_df).rename(
         columns={
             "month": "month",
@@ -297,8 +321,15 @@ def page_calendar_and_coverage(pdf, processed: pd.DataFrame, activity_df: pd.Dat
             "% days with body composition": "body comp %",
         }
     )
-    render_table(ax_table, coverage_table, "Data Coverage / Missingness Table", font_size=8.0, header_wrap=12)
-    fig.suptitle("Month Calendar Heatmap & Coverage", fontsize=15, fontweight="bold")
-    finalize_figure(fig, top=0.9, bottom=0.05, left=0.06, right=0.95, hspace=0.38, wspace=0.32)
+    render_table(
+        ax_table,
+        coverage_table,
+        "Data Coverage / Missingness Table",
+        font_size=9.2,
+        header_wrap=14,
+        bbox=(0.02, 0.02, 0.96, 0.92),
+    )
+    fig.suptitle("Garmin Data Coverage Overview", fontsize=15, fontweight="bold")
+    finalize_figure(fig, top=0.9, bottom=0.05, left=0.04, right=0.98, hspace=0.2, wspace=0.2)
     pdf.savefig(fig)
     plt.close(fig)

@@ -1,5 +1,10 @@
 # TASK
 
+## 2026-03-23
+
+- [x] Improve Garmin analytics visual clarity and layout for TDEE context, activity regimes, lag heatmaps, recovery scatter, activity-type contribution, and coverage tables.
+- [x] Write a changelog entry for the 2026-03-23 Garmin visualization refinement work.
+
 ## 2026-03-20
 
 - [x] Implement Garmin historical backfill and incremental sync storage.

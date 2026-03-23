@@ -126,7 +126,7 @@ class TestRenderGarminAnalyticsPages:
             {"weighted_average": 2600},
         )
 
-        assert len(pdf.figures) == 8
+        assert len(pdf.figures) == 9
         titles = {
             axis.get_title()
             for figure in pdf.figures
@@ -134,9 +134,11 @@ class TestRenderGarminAnalyticsPages:
             if axis.get_title()
         }
         assert "Garmin-Adjusted TDEE Context" in titles
+        assert "Recent 30d: Lag vs Daily Weight Change" in titles
         assert "Lag Correlation Summary" in titles
         assert "Weight Spike Attribution Z-Scores" in titles
         assert "Weekly Activity Calories by Type" in titles
+        assert any("Weight Change" in title for title in titles)
         assert "Data Coverage / Missingness Table" in titles
 
     def test_edge_case_without_activity_sessions_still_renders_bundle(
@@ -162,7 +164,7 @@ class TestRenderGarminAnalyticsPages:
             {"weighted_average": 2550},
         )
 
-        assert len(pdf.figures) == 8
+        assert len(pdf.figures) == 9
 
     def test_failure_case_activity_loader_missing_file_returns_empty_frame(self) -> None:
         """A missing Garmin activity artifact should load as an empty DataFrame.
