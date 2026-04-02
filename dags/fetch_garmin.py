@@ -1,7 +1,7 @@
 """Garmin daily data extraction for the Airflow pipeline."""
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 from time import perf_counter
 from typing import Any, Dict, Optional
 
@@ -22,6 +22,7 @@ from garmin_daily_normalization import (
     _extract_duration_minutes,
     _extract_nested_value,
 )
+from garmin_gap_backfill import find_garmin_daily_gap_dates
 from garmin_sync_storage import (
     build_date_range,
     build_date_range_from_bounds,
@@ -64,6 +65,106 @@ def _extract_text_value(
         cleaned = value.strip()
         return cleaned or None
     return str(value)
+
+
+def _collect_numeric_values_for_key(payload: Any, candidate_key: str) -> list[float]:
+    """Recursively collect numeric values for a named key from nested payloads.
+
+    Args:
+        payload (Any): Nested Garmin payload.
+        candidate_key (str): Key name to collect.
+
+    Returns:
+        list[float]: Matching numeric values.
+    """
+    values: list[float] = []
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if key == candidate_key and isinstance(value, (int, float)):
+                values.append(float(value))
+            values.extend(_collect_numeric_values_for_key(value, candidate_key))
+        return values
+    if isinstance(payload, list):
+        for value in payload:
+            values.extend(_collect_numeric_values_for_key(value, candidate_key))
+    return values
+
+
+def _extract_hrv_value(payload: Any, date_str: str) -> Optional[float]:
+    """Extract the best available HRV value from a Garmin HRV payload.
+
+    Args:
+        payload (Any): Garmin HRV endpoint payload.
+        date_str (str): ISO date being normalized.
+
+    Returns:
+        Optional[float]: HRV value when one can be resolved.
+    """
+    direct_value = _extract_nested_value(
+        payload,
+        [
+            ("lastNightAvg",),
+            ("weeklyAvg",),
+            ("avgOvernightHrv",),
+            ("hrvValue",),
+            ("value",),
+            ("summary", "lastNightAvg"),
+            ("summary", "avgOvernightHrv"),
+            ("hrvSummary", "lastNightAvg"),
+            ("hrvSummary", "avgOvernightHrv"),
+        ],
+    )
+    if isinstance(direct_value, (int, float)):
+        return float(direct_value)
+
+    candidate_lists: list[list[Any]] = []
+    if isinstance(payload, list):
+        candidate_lists.append(payload)
+    if isinstance(payload, dict):
+        for list_key in ["hrvSummaries", "summaries", "data", "items", "values"]:
+            list_value = payload.get(list_key)
+            if isinstance(list_value, list):
+                candidate_lists.append(list_value)
+
+    for candidate_list in candidate_lists:
+        for entry in candidate_list:
+            if not isinstance(entry, dict):
+                continue
+            entry_date = (
+                entry.get("calendarDate")
+                or entry.get("date")
+                or entry.get("measurementDate")
+                or entry.get("calendar_date")
+            )
+            if entry_date is not None and str(entry_date).split("T")[0] != date_str:
+                continue
+            for path in [
+                ("lastNightAvg",),
+                ("avgOvernightHrv",),
+                ("hrvValue",),
+                ("value",),
+                ("summary", "lastNightAvg"),
+                ("summary", "avgOvernightHrv"),
+            ]:
+                value = _extract_nested_value(entry, [path])
+                if isinstance(value, (int, float)):
+                    return float(value)
+
+    # Reason: Garmin HRV payloads vary by client/library version, so fall back
+    # to a recursive key search before giving up on recent-day extraction.
+    for candidate_key in [
+        "lastNightAvg",
+        "avgOvernightHrv",
+        "hrvValue",
+        "rmssd",
+        "rmssdHrv",
+        "value",
+        "weeklyAvg",
+    ]:
+        values = _collect_numeric_values_for_key(payload, candidate_key)
+        if values:
+            return float(values[0])
+    return None
 
 def _collect_garmin_day_payloads(client: Any, date_str: str) -> Dict[str, Any]:
     """Fetch the Garmin endpoint payloads used by daily normalization.
@@ -294,16 +395,7 @@ def _build_normalized_garmin_day(
         "garmin_hr_min_bpm": heart_rate_summary.get("garmin_hr_min_bpm"),
         "garmin_hr_max_bpm": heart_rate_summary.get("garmin_hr_max_bpm"),
         "garmin_hr_avg_bpm": heart_rate_summary.get("garmin_hr_avg_bpm"),
-        "garmin_hrv": _extract_nested_value(
-            hrv_payload,
-            [
-                ("lastNightAvg",),
-                ("weeklyAvg",),
-                ("avgOvernightHrv",),
-                ("hrvValue",),
-                ("value",),
-            ],
-        ),
+        "garmin_hrv": _extract_hrv_value(hrv_payload, date_str),
         "garmin_respiration_avg": _extract_nested_value(
             respiration_payload,
             [
@@ -389,7 +481,7 @@ def fetch_garmin_daily_data(
         GarminServiceError: If Garmin data cannot be fetched reliably.
         ValueError: If the lookback window is invalid.
     """
-    effective_end_date = date.today()
+    effective_end_date = date.today() - timedelta(days=1)
     effective_lookback_days = lookback_days or get_garmin_lookback_days()
     historical_start_date = get_garmin_historical_start_date(
         end_date=effective_end_date,
@@ -421,6 +513,14 @@ def fetch_garmin_daily_data(
     elif existing_daily is None or existing_daily.empty:
         sync_mode = "initial backfill"
     date_strings = build_date_range_from_bounds(sync_start_date, effective_end_date)
+    gap_backfill_dates = find_garmin_daily_gap_dates(
+        existing_daily,
+        historical_start_date=historical_start_date,
+        end_date=effective_end_date,
+        overlap_start_date=sync_start_date,
+    )
+    if gap_backfill_dates:
+        date_strings = sorted(set(date_strings).union(gap_backfill_dates))
     LOGGER.info(
         "Starting Garmin %s from %s to %s into %s.",
         sync_mode,
@@ -428,6 +528,12 @@ def fetch_garmin_daily_data(
         effective_end_date.isoformat(),
         output_path,
     )
+    if gap_backfill_dates:
+        LOGGER.info(
+            "Detected %s bounded Garmin gap date(s) outside the overlap window: %s.",
+            len(gap_backfill_dates),
+            ", ".join(gap_backfill_dates),
+        )
     client = load_garmin_client_from_tokens()
     LOGGER.info(
         "Garmin client restored successfully. Fetching %s date(s).",

@@ -111,8 +111,46 @@ class TestPageTdeeDashboard:
 
         ax_bars, ax_summary, ax_intake = fig.axes
         assert ax_bars.get_title() == "TDEE Estimates by Method"
-        assert ax_intake.get_title() == "Intake vs TDEE Over Time"
+        assert ax_intake.get_title() == "Intake vs TDEE Over Last 6 Months"
         assert ax_summary.axison is False
+
+    def test_edge_case_long_history_is_limited_to_last_six_months(
+        self, sample_tdee_estimates
+    ) -> None:
+        """Long histories should be clipped to the last six months on the intake plot.
+
+        Args:
+            sample_tdee_estimates (dict): Synthetic TDEE estimate output.
+
+        Returns:
+            None
+        """
+        n_days = 365
+        dates = pd.date_range("2025-01-01", periods=n_days, freq="D")
+        processed = pd.DataFrame(
+            {
+                "Date": dates,
+                "Energy (kcal)": np.linspace(2600, 3200, n_days),
+                "Weight (kg)": np.linspace(92, 86, n_days),
+                "TDEE_adaptive": np.linspace(3000, 2900, n_days),
+            }
+        )
+        pdf = DummyPdf()
+
+        page_tdee_dashboard(
+            pdf,
+            processed,
+            sample_tdee_estimates,
+            target_calories=2500,
+            target_weight_kg=80,
+        )
+
+        ax_intake = pdf.figures[0].axes[2]
+        plotted_dates = pd.to_datetime(ax_intake.lines[0].get_xdata())
+        expected_cutoff = processed["Date"].max() - pd.DateOffset(months=6)
+
+        assert plotted_dates.min() >= expected_cutoff
+        assert plotted_dates.max() == processed["Date"].max()
 
     def test_edge_case_without_adaptive_series_uses_fallback_chart(
         self, sample_processed, sample_tdee_estimates

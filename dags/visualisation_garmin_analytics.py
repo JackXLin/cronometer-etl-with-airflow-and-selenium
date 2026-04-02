@@ -200,15 +200,18 @@ def page_garmin_lag_heatmap(pdf, processed: pd.DataFrame) -> None:
     daily_result = build_lag_correlation_result(processed, GARMIN_LAG_METRICS, "Daily Weight change (kg)")
     trend_result = build_lag_correlation_result(processed, GARMIN_LAG_METRICS, "Weight_trend_change_7d")
     recent_processed = processed.sort_values("Date").tail(30).reset_index(drop=True)
+    recent_min_samples = 5
     recent_daily_result = build_lag_correlation_result(
         recent_processed,
         GARMIN_LAG_METRICS,
         "Daily Weight change (kg)",
+        min_samples=recent_min_samples,
     )
     recent_trend_result = build_lag_correlation_result(
         recent_processed,
         GARMIN_LAG_METRICS,
         "Weight_trend_change_7d",
+        min_samples=recent_min_samples,
     )
     fig = plt.figure(figsize=(16.8, 14.2))
     gs = gridspec.GridSpec(

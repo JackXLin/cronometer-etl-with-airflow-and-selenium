@@ -181,6 +181,33 @@ class TestLagAndOutlierAnalytics:
         assert result.summary_table.loc[0, "metric"] == "steps"
         assert pd.isna(result.summary_table.loc[0, "best_correlation"])
 
+    def test_edge_case_sparse_recent_hrv_supports_recent_window_threshold(
+        self,
+        sample_processed_garmin_analytics: pd.DataFrame,
+    ) -> None:
+        """Sparse recent HRV should still produce recent-window correlations.
+
+        Args:
+            sample_processed_garmin_analytics (pd.DataFrame): Synthetic processed data.
+
+        Returns:
+            None
+        """
+        sparse = sample_processed_garmin_analytics.copy()
+        sparse["garmin_hrv"] = np.nan
+        recent_hrv_index = sparse.tail(6).index
+        sparse.loc[recent_hrv_index, "garmin_hrv"] = np.linspace(55, 70, len(recent_hrv_index))
+        enriched, _ = prepare_garmin_report_inputs(sparse)
+        result = build_lag_correlation_result(
+            enriched.tail(30).reset_index(drop=True),
+            {"HRV": "garmin_hrv"},
+            "Daily Weight change (kg)",
+            min_samples=5,
+        )
+
+        assert result.correlation_matrix.loc["HRV"].notna().any()
+        assert result.summary_table.loc[0, "sample_size"] >= 5
+
     def test_failure_case_outlier_table_returns_empty_when_no_large_weight_spikes(
         self,
         sample_processed_garmin_analytics: pd.DataFrame,

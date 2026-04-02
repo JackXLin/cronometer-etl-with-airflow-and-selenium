@@ -221,6 +221,7 @@ def build_lag_correlation_result(
     metric_map: dict[str, str],
     target_column: str,
     max_lag: int = 7,
+    min_samples: int = 11,
 ) -> LagTableResult:
     """Compute lagged correlations for Garmin metrics against a target series.
 
@@ -229,6 +230,7 @@ def build_lag_correlation_result(
         metric_map (dict[str, str]): Display labels to source columns.
         target_column (str): Target column to correlate against.
         max_lag (int): Maximum lag in days.
+        min_samples (int): Minimum overlapping observations required.
 
     Returns:
         LagTableResult: Heatmap matrix plus summary table.
@@ -258,12 +260,13 @@ def build_lag_correlation_result(
         for lag in range(max_lag + 1):
             shifted_metric = metric.shift(lag)
             valid = ~(shifted_metric.isna() | target.isna())
-            if valid.sum() > 10:
+            valid_count = int(valid.sum())
+            if valid_count >= min_samples:
                 correlations.append(float(stats.pearsonr(shifted_metric[valid], target[valid])[0]))
-                counts.append(int(valid.sum()))
+                counts.append(valid_count)
             else:
                 correlations.append(np.nan)
-                counts.append(int(valid.sum()))
+                counts.append(valid_count)
         matrix_rows.append(correlations)
         valid_pairs = [(lag, value) for lag, value in enumerate(correlations) if not np.isnan(value)]
         if valid_pairs:

@@ -180,6 +180,26 @@ class MinimalGarminClient:
         return {"moderateIntensityMinutes": 20}
 
 
+class NestedHrvGarminClient(MinimalGarminClient):
+    """Fake client exposing HRV in a nested summary-list payload."""
+
+    def get_hrv_data(self, date_str: str):
+        """Return a nested HRV payload resembling newer Garmin responses.
+
+        Args:
+            date_str (str): Requested Garmin date.
+
+        Returns:
+            dict[str, list[dict[str, object]]]: Synthetic HRV payload.
+        """
+        return {
+            "hrvSummaries": [
+                {"calendarDate": "2025-01-09", "lastNightAvg": 51},
+                {"calendarDate": date_str, "summary": {"avgOvernightHrv": 63}},
+            ]
+        }
+
+
 class TestBuildDateRange:
     """Tests for Garmin date range generation."""
 
@@ -240,6 +260,16 @@ class TestNormalizeGarminDay:
         assert result["garmin_body_battery_min"] is None
         assert result["garmin_activity_count"] is None
 
+    def test_edge_case_nested_hrv_payload_extracts_matching_day_value(self) -> None:
+        """Nested HRV payloads should resolve the current day's HRV value.
+
+        Returns:
+            None
+        """
+        result = fetch_garmin.normalize_garmin_day(NestedHrvGarminClient(), "2025-01-10")
+
+        assert result["garmin_hrv"] == 63.0
+
 
 class TestFetchGarminDailyData:
     """Tests for end-to-end Garmin CSV generation."""
@@ -269,7 +299,7 @@ class TestFetchGarminDailyData:
                 Returns:
                     date: Fixed sync end date.
                 """
-                return cls(2025, 1, 2)
+                return cls(2025, 1, 3)
 
         monkeypatch.setattr(fetch_garmin, "date", FixedDate)
         monkeypatch.setattr(fetch_garmin, "load_garmin_client_from_tokens", lambda: object())
@@ -299,6 +329,68 @@ class TestFetchGarminDailyData:
         assert result == str(output_path)
         assert list(written["Date"]) == ["2025-01-01", "2025-01-02"]
         assert list(written["garmin_steps"]) == [1000, 2000]
+
+    def test_edge_case_excludes_current_day_from_fetch_window(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Should stop the Garmin sync at yesterday instead of fetching today.
+
+        Args:
+            monkeypatch (pytest.MonkeyPatch): Pytest patch helper.
+            tmp_path (Path): Temporary output directory.
+
+        Returns:
+            None
+        """
+        output_path = tmp_path / "garmin_daily.csv"
+        fetched_dates: list[str] = []
+
+        class FixedDate(date):
+            """Fixed date helper for deterministic fetch windows."""
+
+            @classmethod
+            def today(cls) -> date:
+                """Return the fixed current date.
+
+                Returns:
+                    date: Fixed wall-clock current date.
+                """
+                return cls(2025, 1, 2)
+
+        monkeypatch.setattr(fetch_garmin, "date", FixedDate)
+        monkeypatch.setattr(fetch_garmin, "load_garmin_client_from_tokens", lambda: object())
+        monkeypatch.setenv("GARMIN_HISTORICAL_START_DATE", "2025-01-01")
+        monkeypatch.setenv("GARMIN_SYNC_OVERLAP_DAYS", "2")
+        monkeypatch.delenv("GARMIN_FORCE_FULL_REFRESH", raising=False)
+
+        def _normalize_day(_client: object, date_str: str) -> dict[str, int | str]:
+            """Capture fetched Garmin dates for assertions.
+
+            Args:
+                _client (object): Ignored fake Garmin client.
+                date_str (str): Garmin date being normalized.
+
+            Returns:
+                dict[str, int | str]: Synthetic Garmin row.
+            """
+            fetched_dates.append(date_str)
+            return {
+                "Date": date_str,
+                "garmin_steps": 1000,
+            }
+
+        monkeypatch.setattr(fetch_garmin, "normalize_garmin_day", _normalize_day)
+
+        result = fetch_garmin.fetch_garmin_daily_data(
+            lookback_days=2,
+            output_path=str(output_path),
+        )
+        written = pd.read_csv(result)
+
+        assert fetched_dates == ["2025-01-01"]
+        assert list(written["Date"]) == ["2025-01-01"]
 
     def test_edge_case_incremental_sync_merges_existing_history(
         self,
@@ -332,7 +424,7 @@ class TestFetchGarminDailyData:
                 Returns:
                     date: Fixed sync end date.
                 """
-                return cls(2025, 1, 4)
+                return cls(2025, 1, 5)
 
         captured_bounds: dict[str, date] = {}
         original_build_date_range = fetch_garmin.build_date_range_from_bounds
@@ -385,6 +477,99 @@ class TestFetchGarminDailyData:
             "2025-01-04",
         ]
         assert list(written["garmin_steps"]) == [1000, 2000, 3000, 4000]
+
+    def test_edge_case_gap_backfill_dates_are_added_to_incremental_sync(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Detected historical gap dates should be unioned into the fetch list.
+
+        Args:
+            monkeypatch (pytest.MonkeyPatch): Pytest patch helper.
+            tmp_path (Path): Temporary output directory.
+
+        Returns:
+            None
+        """
+        output_path = tmp_path / "garmin_daily.csv"
+        pd.DataFrame(
+            {
+                "Date": ["2025-01-09", "2025-01-10"],
+                "garmin_steps": [1900, 2000],
+            }
+        ).to_csv(output_path, index=False)
+
+        class FixedDate(date):
+            """Fixed date helper for deterministic fetch windows."""
+
+            @classmethod
+            def today(cls) -> date:
+                """Return the fixed current date.
+
+                Returns:
+                    date: Fixed sync end date.
+                """
+                return cls(2025, 1, 12)
+
+        fetched_dates: list[str] = []
+        monkeypatch.setattr(fetch_garmin, "date", FixedDate)
+        monkeypatch.setattr(fetch_garmin, "load_garmin_client_from_tokens", lambda: object())
+        monkeypatch.setenv("GARMIN_HISTORICAL_START_DATE", "2025-01-01")
+        monkeypatch.setenv("GARMIN_SYNC_OVERLAP_DAYS", "2")
+        monkeypatch.delenv("GARMIN_FORCE_FULL_REFRESH", raising=False)
+        monkeypatch.setattr(
+            fetch_garmin,
+            "build_date_range_from_bounds",
+            lambda start_date, end_date: ["2025-01-08", "2025-01-09", "2025-01-10", "2025-01-11"],
+        )
+        monkeypatch.setattr(
+            fetch_garmin,
+            "find_garmin_daily_gap_dates",
+            lambda *_args, **_kwargs: ["2025-01-05"],
+        )
+
+        def _normalize_day(_client: object, date_str: str) -> dict[str, int | str]:
+            """Capture the fetched dates and return synthetic Garmin rows.
+
+            Args:
+                _client (object): Ignored fake Garmin client.
+                date_str (str): Garmin date being normalized.
+
+            Returns:
+                dict[str, int | str]: Synthetic Garmin row.
+            """
+            fetched_dates.append(date_str)
+            return {
+                "Date": date_str,
+                "garmin_steps": {
+                    "2025-01-05": 1500,
+                    "2025-01-08": 1800,
+                    "2025-01-09": 1900,
+                    "2025-01-10": 2000,
+                    "2025-01-11": 2100,
+                }[date_str],
+            }
+
+        monkeypatch.setattr(fetch_garmin, "normalize_garmin_day", _normalize_day)
+
+        result = fetch_garmin.fetch_garmin_daily_data(output_path=str(output_path))
+        written = pd.read_csv(result)
+
+        assert fetched_dates == [
+            "2025-01-05",
+            "2025-01-08",
+            "2025-01-09",
+            "2025-01-10",
+            "2025-01-11",
+        ]
+        assert list(written["Date"]) == [
+            "2025-01-05",
+            "2025-01-08",
+            "2025-01-09",
+            "2025-01-10",
+            "2025-01-11",
+        ]
 
     def test_invalid_env_lookback_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Should reject invalid Garmin lookback configuration.

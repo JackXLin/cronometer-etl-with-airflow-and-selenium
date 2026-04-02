@@ -328,33 +328,41 @@ def page_tdee_dashboard(pdf, processed, tdee_estimates, target_calories,
     est_tdee = tdee_estimates.get("weighted_average")
 
     if est_tdee and "TDEE_adaptive" in processed.columns:
-        intake_7d = processed["Energy (kcal)"].rolling(7, min_periods=1).mean()
-        tdee_line = processed["TDEE_adaptive"]
-        ax_intake.plot(processed["Date"], intake_7d, color="blue", linewidth=1,
+        plot_processed = processed.sort_values("Date").reset_index(drop=True).copy()
+        plot_processed["intake_7d"] = plot_processed["Energy (kcal)"].rolling(7, min_periods=1).mean()
+        six_month_cutoff = plot_processed["Date"].max() - pd.DateOffset(months=6)
+        plot_processed = plot_processed.loc[
+            plot_processed["Date"] >= six_month_cutoff
+        ].reset_index(drop=True)
+        intake_7d = plot_processed["intake_7d"]
+        tdee_line = plot_processed["TDEE_adaptive"]
+        ax_intake.plot(plot_processed["Date"], intake_7d, color="blue", linewidth=1,
                        label="7d Avg Intake")
-        ax_intake.plot(processed["Date"], tdee_line, color="red", linewidth=1,
+        ax_intake.plot(plot_processed["Date"], tdee_line, color="red", linewidth=1,
                        label="Adaptive TDEE")
 
         # Reason: shade the gap between intake and TDEE to show when
         # the user was in deficit (green) vs surplus (red).
         ax_intake.fill_between(
-            processed["Date"], intake_7d, tdee_line,
+            plot_processed["Date"], intake_7d, tdee_line,
             where=(intake_7d <= tdee_line),
             color="green", alpha=0.15, label="Deficit",
             interpolate=True,
         )
         ax_intake.fill_between(
-            processed["Date"], intake_7d, tdee_line,
+            plot_processed["Date"], intake_7d, tdee_line,
             where=(intake_7d > tdee_line),
             color="red", alpha=0.15, label="Surplus",
             interpolate=True,
         )
-        ax_intake.set_title("Intake vs TDEE Over Time", fontsize=14,
+        ax_intake.set_title("Intake vs TDEE Over Last 6 Months", fontsize=14,
                             fontweight="bold", pad=10)
         ax_intake.set_xlabel("Date")
         ax_intake.set_ylabel("Calories / Day")
         ax_intake.legend(fontsize=9, loc="upper left")
         ax_intake.grid(True, alpha=0.3)
+        ax_intake.xaxis.set_major_locator(mdates.MonthLocator())
+        ax_intake.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
         plt.setp(ax_intake.xaxis.get_majorticklabels(), rotation=45)
     else:
         # Fallback to simple bar comparison
